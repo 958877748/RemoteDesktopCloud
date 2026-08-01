@@ -4,14 +4,14 @@ import { z } from "zod";
 
 function createServer() {
   const server = new McpServer({
-    name: "cloudflare-html2sprite-mcp",
+    name: "personal-agent-mcp",
     version: "0.1.0",
   });
 
   server.registerTool(
     "sprite_test",
     {
-      description: "A simple test tool for the Cloudflare html2sprite MCP server.",
+      description: "A simple test tool for the Personal Agent MCP server.",
       inputSchema: {
         message: z.string().default("hello"),
       },
@@ -23,7 +23,7 @@ function createServer() {
           text: JSON.stringify({
             success: true,
             message,
-            server: "cloudflare-html2sprite-mcp",
+            server: "personal-agent-mcp",
             timestamp: new Date().toISOString(),
           }),
         },
@@ -46,7 +46,7 @@ export default {
 
     return new Response(
       JSON.stringify({
-        name: "cloudflare-html2sprite-mcp",
+        name: "personal-agent-mcp",
         status: "ok",
         mcpEndpoint: "/mcp",
       }),
