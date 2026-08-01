@@ -3,5 +3,8 @@
   "name": "cloudflare-html2sprite-mcp",
   "main": "src/index.ts",
   "compatibility_date": "2026-08-01",
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
   "workers_dev": true
 }
