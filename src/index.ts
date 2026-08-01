@@ -2,6 +2,15 @@ import { createMcpHandler } from "agents/mcp/server";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { listRuntimes, registerRuntime } from "./runtime/registry";
+import {
+  connectRuntime,
+  getRuntimeSession,
+  heartbeatRuntime,
+  listRuntimeSessions,
+} from "./runtime/session";
+import { PendingRuntimeTransport } from "./runtime/transport";
+
+const transport = new PendingRuntimeTransport();
 
 function createServer() {
   const server = new McpServer({
@@ -24,6 +33,7 @@ function createServer() {
             type: "runtime-controller",
             version: "0.1.0",
             connectedRuntimes: listRuntimes().length,
+            activeSessions: listRuntimeSessions().length,
           }),
         },
       ],
@@ -35,21 +45,45 @@ function createServer() {
     {
       description: "Register a user's local personal agent runtime.",
       inputSchema: {
-        id: z.string(),
+        id: z.string().min(1),
         capabilities: z.array(z.string()).default([]),
       },
     },
-    async ({ id, capabilities }) => ({
+    async ({ id, capabilities }) => {
+      const runtime = registerRuntime({
+        id,
+        capabilities,
+        lastSeen: new Date().toISOString(),
+      });
+      const session = connectRuntime(id);
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({ runtime, session }),
+          },
+        ],
+      };
+    },
+  );
+
+  server.registerTool(
+    "heartbeat_runtime",
+    {
+      description: "Update the heartbeat for a connected local runtime.",
+      inputSchema: {
+        runtimeId: z.string().min(1),
+      },
+    },
+    async ({ runtimeId }) => ({
       content: [
         {
           type: "text",
-          text: JSON.stringify(
-            registerRuntime({
-              id,
-              capabilities,
-              lastSeen: new Date().toISOString(),
-            }),
-          ),
+          text: JSON.stringify({
+            runtimeId,
+            session: heartbeatRuntime(runtimeId),
+          }),
         },
       ],
     }),
@@ -58,7 +92,7 @@ function createServer() {
   server.registerTool(
     "discover",
     {
-      description: "Discover connected runtime capabilities.",
+      description: "Discover connected runtime capabilities and sessions.",
       inputSchema: {},
     },
     async () => ({
@@ -67,6 +101,7 @@ function createServer() {
           type: "text",
           text: JSON.stringify({
             runtimes: listRuntimes(),
+            sessions: listRuntimeSessions(),
           }),
         },
       ],
@@ -76,25 +111,45 @@ function createServer() {
   server.registerTool(
     "execute_runtime",
     {
-      description: "Execute code on a connected local runtime (placeholder).",
+      description: "Execute code on a connected local runtime.",
       inputSchema: {
-        runtimeId: z.string(),
-        code: z.string(),
+        runtimeId: z.string().min(1),
+        code: z.string().min(1),
       },
     },
-    async ({ runtimeId, code }) => ({
-      content: [
-        {
-          type: "text",
-          text: JSON.stringify({
-            accepted: true,
-            runtimeId,
-            code,
-            status: "queued",
-          }),
-        },
-      ],
-    }),
+    async ({ runtimeId, code }) => {
+      const session = getRuntimeSession(runtimeId);
+
+      if (!session) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                accepted: false,
+                runtimeId,
+                status: "runtime_not_connected",
+              }),
+            },
+          ],
+        };
+      }
+
+      const result = await transport.send({
+        requestId: crypto.randomUUID(),
+        runtimeId,
+        code,
+      });
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result),
+          },
+        ],
+      };
+    },
   );
 
   return server;
@@ -115,6 +170,7 @@ export default {
         name: "personal-agent-mcp",
         status: "ok",
         mcpEndpoint: "/mcp",
+        runtimeSessions: listRuntimeSessions().length,
       }),
       {
         headers: { "content-type": "application/json" },
