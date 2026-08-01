@@ -1,6 +1,7 @@
 import { createMcpHandler } from "agents/mcp/server";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { listRuntimes, registerRuntime } from "./runtime/registry";
 
 function createServer() {
   const server = new McpServer({
@@ -9,22 +10,87 @@ function createServer() {
   });
 
   server.registerTool(
-    "sprite_test",
+    "runtime_info",
     {
-      description: "A simple test tool for the Personal Agent MCP server.",
-      inputSchema: {
-        message: z.string().default("hello"),
-      },
+      description: "Get personal agent runtime information.",
+      inputSchema: {},
     },
-    async ({ message }) => ({
+    async () => ({
       content: [
         {
           type: "text",
           text: JSON.stringify({
-            success: true,
-            message,
-            server: "personal-agent-mcp",
-            timestamp: new Date().toISOString(),
+            name: "personal-agent-mcp",
+            type: "runtime-controller",
+            version: "0.1.0",
+            connectedRuntimes: listRuntimes().length,
+          }),
+        },
+      ],
+    }),
+  );
+
+  server.registerTool(
+    "register_runtime",
+    {
+      description: "Register a user's local personal agent runtime.",
+      inputSchema: {
+        id: z.string(),
+        capabilities: z.array(z.string()).default([]),
+      },
+    },
+    async ({ id, capabilities }) => ({
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(
+            registerRuntime({
+              id,
+              capabilities,
+              lastSeen: new Date().toISOString(),
+            }),
+          ),
+        },
+      ],
+    }),
+  );
+
+  server.registerTool(
+    "discover",
+    {
+      description: "Discover connected runtime capabilities.",
+      inputSchema: {},
+    },
+    async () => ({
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({
+            runtimes: listRuntimes(),
+          }),
+        },
+      ],
+    }),
+  );
+
+  server.registerTool(
+    "execute_runtime",
+    {
+      description: "Execute code on a connected local runtime (placeholder).",
+      inputSchema: {
+        runtimeId: z.string(),
+        code: z.string(),
+      },
+    },
+    async ({ runtimeId, code }) => ({
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({
+            accepted: true,
+            runtimeId,
+            code,
+            status: "queued",
           }),
         },
       ],
