@@ -1,10 +1,10 @@
-# Cloudflare HTML2Sprite MCP
+# Personal Agent MCP
 
 A minimal remote MCP server running on Cloudflare Workers.
 
 ## Deploy to Cloudflare
 
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/958877748/cloudflare-html2sprite-mcp)
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/958877748/personal-agent-mcp)
 
 Click the button above to deploy this repository to your Cloudflare account. Cloudflare will create/configure the Worker and deploy it using the repository's Wrangler configuration.
 
