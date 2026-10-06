@@ -6,5 +6,14 @@
   "compatibility_flags": [
     "nodejs_compat"
   ],
-  "workers_dev": true
+  "workers_dev": true,
+  // OAuth provider 的 KV：client / grant / token 记录。
+  // 本地 dev 用 id 当本地命名空间键即可；真正部署前先
+  // `wrangler kv namespace create OAUTH_KV` 再把返回的 id 填回来。
+  "kv_namespaces": [
+    {
+      "binding": "OAUTH_KV",
+      "id": "local-oauth-kv-placeholder"
+    }
+  ]
 }

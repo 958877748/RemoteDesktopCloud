@@ -90,6 +90,14 @@ export async function createDevice(
   return rows[0].id;
 }
 
+/** 当前用户的全部设备（list_devices 工具用）。 */
+export async function listDevices(env: Env): Promise<any[]> {
+  return (await rest(
+    env,
+    `mcp_devices?user_id=eq.${encodeURIComponent(env.USER_ID)}&select=id,device_name,status,last_seen,capabilities&order=last_seen.desc`,
+  )) as any[];
+}
+
 /** password grant：换 GoTrue 签发的真 session（设备端 setSession 依赖它）。 */
 export async function issueSession(env: Env): Promise<{
   access_token: string;

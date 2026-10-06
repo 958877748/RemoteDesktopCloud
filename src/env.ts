@@ -1,4 +1,5 @@
 /** Supabase 项目配置与身份常量。所有值来自 Worker 环境变量。 */
+import type { OAuthHelpers } from "@cloudflare/workers-oauth-provider";
 
 export interface Env {
   SUPABASE_URL: string;
@@ -10,6 +11,11 @@ export interface Env {
   USER_ID: string;
   /** 唯一用户的邮箱，用于 password grant 换 GoTrue token */
   USER_EMAIL: string;
+
+  /** `@cloudflare/workers-oauth-provider` 的 KV 绑定（client/grant/token 记录） */
+  OAUTH_KV: KVNamespace;
+  /** provider 在分发到 defaultHandler/apiHandler 之前注入的 OAuth 助手 */
+  OAUTH_PROVIDER?: OAuthHelpers;
 }
 
 export function requireEnv(env: Env): void {
@@ -18,4 +24,5 @@ export function requireEnv(env: Env): void {
   if (missing.length) {
     throw new Error(`Missing env: ${missing.join(", ")}`);
   }
+  if (!env.OAUTH_KV) throw new Error("Missing binding: OAUTH_KV");
 }

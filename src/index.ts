@@ -1,73 +1,73 @@
+/**
+ * Worker 入口。
+ *
+ * 所有请求先经 `@cloudflare/workers-oauth-provider`：
+ *   - `/.well-known/*`、`POST /token`、`POST /register`、`/mcp` 的 Bearer 校验 → provider 内建
+ *   - `/mcp`（拿到 token 后）→ `mcpApiHandler`，挂 MCP 服务端
+ *   - 其余（`/device/*`、`/authorize`、`/api/mcp-info`）→ `defaultHandler`（下面的路由表）
+ */
 import { createMcpHandler } from "agents/mcp/server";
-import { McpServer } from "@modelcontextprotocol/server";
-import type { Env } from "./env.js";
-import { requireEnv } from "./env.js";
 import {
   handleDevicePoll,
   handleDeviceStart,
   handleDeviceVerify,
   handleMcpInfo,
+  page,
 } from "./device-auth.js";
+import type { Env } from "./env.js";
+import { requireEnv } from "./env.js";
+import { createServer, SERVER_NAME, SERVER_VERSION } from "./mcp.js";
+import { getProvider, handleAuthorize, wrapProvider, type FetchHandler } from "./oauth.js";
 
-/**
- * MCP 服务端。Step 3 会在这里静态注册 29 个 DesktopCommander 工具；
- * 目前先挂空壳，保证 /mcp 的 Streamable HTTP 传输与骨架可用。
- *
- * 注意：McpServer 必须来自 `@modelcontextprotocol/server`（agents/mcp/server 的
- * createMcpHandler 期望的就是这一份类型），不能用 `@modelcontextprotocol/sdk`。
- */
-function createServer(_env: Env): McpServer {
-  return new McpServer({ name: "remotedesktopcloud", version: "0.1.0" });
+/** `/mcp`：provider 校验完 Bearer 之后调进来，`ctx.props` 是授权时写入的 grant props。 */
+const mcpApiHandler: FetchHandler = {
+  fetch(request, env, ctx) {
+    const props = (ctx as { props?: Record<string, unknown> }).props ?? {};
+    const handler = createMcpHandler(() => createServer(env, props), { route: "/mcp" });
+    return handler(request, env, ctx);
+  },
+};
+
+async function route(request: Request, env: Env): Promise<Response> {
+  const { pathname } = new URL(request.url);
+
+  if (pathname === "/api/mcp-info") return handleMcpInfo(request, env);
+  if (pathname === "/device/start" && request.method === "POST") return handleDeviceStart(request, env);
+  if (pathname === "/device/poll" && request.method === "POST") return handleDevicePoll(request, env);
+  if (pathname === "/device/verify") return handleDeviceVerify(request, env);
+  if (pathname === "/authorize") return handleAuthorize(request, env);
+
+  if (pathname === "/") {
+    return Response.json(
+      {
+        name: SERVER_NAME,
+        version: SERVER_VERSION,
+        mcp: "/mcp",
+        authorize: "/authorize",
+        device: ["/api/mcp-info", "/device/start", "/device/verify", "/device/poll"],
+      },
+      { headers: { "Cache-Control": "no-store" } },
+    );
+  }
+
+  return page("未找到", `<h1>404</h1><p>没有这个路径：<code>${escapeCode(pathname)}</code></p>`, 404);
 }
 
-const mcpHandler = (request: Request, env: Env, ctx: ExecutionContext) =>
-  createMcpHandler(() => createServer(env))(request, env, ctx);
-
-function error(message: string, status = 500): Response {
-  return Response.json({ error: message }, { status });
+function escapeCode(s: string): string {
+  return s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 }
+
+const defaultHandler: FetchHandler = { fetch: (request, env) => route(request, env) };
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    const { pathname } = new URL(request.url);
-
     try {
       requireEnv(env);
-    } catch (e: any) {
-      return error(`Configuration error: ${e.message}`, 500);
+    } catch (err) {
+      return Response.json({ error: err instanceof Error ? err.message : String(err) }, { status: 500 });
     }
-
-    switch (pathname) {
-      case "/mcp":
-        return mcpHandler(request, env, ctx);
-
-      case "/api/mcp-info":
-        return handleMcpInfo(request, env);
-
-      case "/device/start":
-        return request.method === "POST"
-          ? handleDeviceStart(request, env)
-          : error("Method not allowed", 405);
-
-      case "/device/verify":
-        return request.method === "GET" || request.method === "POST"
-          ? handleDeviceVerify(request, env)
-          : error("Method not allowed", 405);
-
-      case "/device/poll":
-        return request.method === "POST"
-          ? handleDevicePoll(request, env)
-          : error("Method not allowed", 405);
-
-      case "/":
-        return Response.json({
-          name: "remotedesktopcloud",
-          status: "ok",
-          endpoints: ["/mcp", "/api/mcp-info", "/device/start", "/device/verify", "/device/poll"],
-        });
-
-      default:
-        return error("Not found", 404);
-    }
+    const origin = new URL(request.url).origin;
+    const provider = wrapProvider(getProvider(origin, mcpApiHandler, defaultHandler));
+    return provider.fetch(request, env, ctx);
   },
-};
+} satisfies ExportedHandler<Env>;

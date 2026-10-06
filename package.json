@@ -7,9 +7,14 @@
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "migrate": "node scripts/migrate.mjs",
-    "migrate:status": "node scripts/migrate.mjs --status"
+    "migrate:status": "node scripts/migrate.mjs --status",
+    "tools:capture": "node scripts/capture-tools.mjs",
+    "test:device": "node scripts/test-device-flow.mjs",
+    "test:oauth": "node scripts/test-oauth-flow.mjs",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@cloudflare/workers-oauth-provider": "^1.2.1",
     "@modelcontextprotocol/sdk": "latest",
     "@modelcontextprotocol/server": "^2.0.0",
     "agents": "latest",

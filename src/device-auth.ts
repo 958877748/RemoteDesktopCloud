@@ -150,7 +150,7 @@ export async function handleDevicePoll(request: Request, env: Env): Promise<Resp
 // /device/verify — 浏览器页面（与 Step 3 的 /authorize 共用密码校验）
 // ---------------------------------------------------------------------------
 
-function page(title: string, body: string, status = 200): Response {
+export function page(title: string, body: string, status = 200): Response {
   return new Response(
     `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -175,7 +175,7 @@ function page(title: string, body: string, status = 200): Response {
   );
 }
 
-function escapeHtml(s: string): string {
+export function escapeHtml(s: string): string {
   return s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 }
 
@@ -280,7 +280,7 @@ async function getDeviceCodeByUserCode(env: Env, userCode: string): Promise<any 
 }
 
 /** 简单的常量时间比较，避免逐字节短路。 */
-function constantTimeEquals(a: string, b: string): boolean {
+export function constantTimeEquals(a: string, b: string): boolean {
   const enc = new TextEncoder();
   const ba = enc.encode(a);
   const bb = enc.encode(b);
