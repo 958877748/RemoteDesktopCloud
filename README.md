@@ -15,7 +15,7 @@ npx @wonderwhy-er/desktop-commander remote ◀───────────�
 - 设备端认领任务、执行、写回结果，Worker 轮询返回给 ChatGPT。
 - 单用户、2-3 台设备，**免费方案**（Cloudflare Free + Supabase Free，¥0）。
 
-> 状态：架构与三项关键决策已敲定（见 §8）。**进度：Step 1 ✅ Step 2 ✅ 均已完成**（建表 → 设备授权流，真机已跑通），进行中为 Step 3。实时进度见 §9。
+> 状态：架构与三项关键决策已敲定（见 §8）。**进度：Step 1 ✅ Step 2 ✅ Step 3 ✅ 均已完成**（建表 → 设备授权流 → `/mcp` + OAuth + 29 工具），进行中为 Step 4。实时进度见 §9。
 
 ---
 
@@ -38,18 +38,19 @@ npx @wonderwhy-er/desktop-commander remote ◀───────────�
 
 ## 2. 端点清单
 
-### ChatGPT 硬性要求（缺一不可）
+### ChatGPT 硬性要求（✅ 已实现，`scripts/test-oauth-flow.mjs` 53/53 通过）
 
 | 端点 | 规范 | 说明 |
 |---|---|---|
 | `POST /mcp` | Streamable HTTP | 公网 HTTPS，MCP 传输 |
-| `GET /.well-known/oauth-protected-resource` | RFC 9728 | 资源元数据 |
+| `GET /.well-known/oauth-protected-resource` | RFC 9728 | 资源元数据（`/mcp` 后缀变体另由 Worker 别名补上，两条都 200） |
 | `GET /.well-known/oauth-authorization-server` | RFC 8414 | 授权服务器元数据 |
 | `GET /authorize` | OAuth 2.1 + PKCE S256 | `redirect_uri` 必须允许 `https://chatgpt.com/connector_platform_oauth_redirect` |
 | `POST /token` | OAuth 2.1 | 发 token |
-| `POST /register` | RFC 7591 DCR | 必须接受任意 UUID `client_id` |
+| `POST /register` | RFC 7591 DCR | 必须接受任意 UUID `client_id`（未注册过的 `client_id` 走 `/authorize` 的 KV 兜底补记录） |
 
-现成组件：`@cloudflare/workers-oauth-provider` 覆盖 OAuth 2.1 + DCR + RFC 8414；`createMcpHandler`（`agents/mcp/server`）覆盖 Streamable HTTP。
+现成组件：`@cloudflare/workers-oauth-provider` 覆盖 OAuth 2.1 + DCR + RFC 8414/9728；`createMcpHandler`（`agents/mcp/server`）覆盖 Streamable HTTP。
+**`/authorize` 是唯一自己实现的 OAuth 端点**（provider 只内建 discovery / token / register / API 鉴权），用它的 `OAuthHelpers` 完成 `parseAuthRequest` → 密码页 → `completeAuthorization`。
 
 ### 设备端注入点（✅ 已实现并真机验证）
 
@@ -177,10 +178,11 @@ Worker  ─▶ 返回 result 给 ChatGPT
 
 ---
 
-## 5. 工具清单（29 个，须静态注册）
+## 5. 工具清单（✅ 已静态注册，29/29）
 
 ChatGPT 端看到的全部工具 = `server.ts` 的 25 个（`get_prompts` 不暴露）+ 4 个 remote 专属。
-`inputSchema` 用 `zodToJsonSchema(...)` 构建期生成后硬编码，不运行时依赖 `server.ts`。
+`inputSchema` **零手抄**：`scripts/capture-tools.mjs` 直接把官方 npm 包当 stdio server 跑起来、抓 `tools/list`
+原样写进 `tools.captured.json`，`src/tools.ts` 过滤掉 `get_prompts` 后再补 4 个 remote 专属定义，最后按 name 排序返回。
 
 **读取（16）**
 `get_config` `get_file_info` `get_more_search_results` `get_recent_tool_calls` `get_usage_stats`
@@ -224,8 +226,8 @@ ChatGPT 端看到的全部工具 = `server.ts` 的 25 个（`get_prompts` 不暴
 
 **保留**
 
-- `src/index.ts` 的 `import { createMcpHandler } from "agents/mcp/server"` 骨架（`/mcp` 仍挂空壳，Step 3 填工具）
-- `wrangler.jsonc`（`nodejs_compat`、`compatibility_date`），name 改为 `remotedesktopcloud`
+- `src/index.ts` 的 `import { createMcpHandler } from "agents/mcp/server"` 骨架（Step 3 已填上 29 个工具）
+- `wrangler.jsonc`（`nodejs_compat`、`compatibility_date`），name 改为 `remotedesktopcloud`；Step 3 加了 `OAUTH_KV` 绑定
 
 **已删除**
 
@@ -255,7 +257,7 @@ ChatGPT 端看到的全部工具 = `server.ts` 的 25 个（`get_prompts` 不暴
 |---|---|---|
 | 1 | schema + RLS + 清扫（sweep） | ✅ **已完成**（`0001_init.sql` + `0002_device_codes.sql` 已应用并反查验证） |
 | 2 | **设备授权流**（`/api/mcp-info` + `/device/start\|verify\|poll` + GoTrue 桥接）→ 先让设备连上 | ✅ **已完成，真机跑通**（官方 npm 包 → 本地 Worker → Supabase，`Channel subscribed` + `Presence tracked` + `online`） |
-| 3 | `/mcp` + OAuth（RFC 8414/9728/7591、PKCE、29 工具静态注册）→ 再让 ChatGPT 能调 | ⬅ **进行中** |
+| 3 | `/mcp` + OAuth（RFC 8414/9728/7591、PKCE、29 工具静态注册）→ 再让 ChatGPT 能调 | ✅ **已完成**（本地全链路 53/53 通过：401→discovery→DCR→authorize→token→initialize→`tools/list`=29） |
 | 4 | 核心链路（落库 → 广播 → 等结果 → 返回） | 待办 |
 | 5 | 端到端联调 | 待办 |
 
@@ -285,6 +287,24 @@ ChatGPT 端看到的全部工具 = `server.ts` 的 25 个（`get_prompts` 不暴
 
 **明确不做**：控制台网页、账单、遥测、feature flags、多租户（数据直接用 Supabase Studio 看）。
 
+### Step 3 交付物（已完成）
+
+- `scripts/capture-tools.mjs` + `tools.captured.json` — 从官方 npm 包的 dist 抓 26 个工具的 `name/description/inputSchema/annotations/_meta`（重跑即可同步设备端）
+- `src/tools.ts` — 29 个工具注册表 = 抓来的 25（滤掉 `get_prompts`）+ 4 个 remote 专属
+- `src/mcp.ts` — 低层 `Server` + `setRequestHandler('tools/list'|'tools/call')`；`who_am_i` / `list_devices` 云端直答，其余 27 个返回 Step 4 占位
+- `src/oauth.ts` — `OAuthProvider` 按 origin 惰性构造并缓存；`/authorize` 密码页（`parseAuthRequest` → 校验 `AUTH_PASSWORD` → `completeAuthorization`，props 写入 `userId`/`email`）
+- `src/index.ts` — 改为 provider 出口：先做 PRM `/mcp` 后缀别名与 token `resource` 归一化，再交给 `OAuthProvider.fetch`
+- `wrangler.jsonc` — 新增 `OAUTH_KV` 绑定（本地用占位 id；部署前须 `wrangler kv namespace create OAUTH_KV` 换真 id）
+- `scripts/test-oauth-flow.mjs` — 12 节 53 项断言，**53/53 通过**（Step 2 的 14 项回归也照旧全绿）
+
+**踩过的坑（已在代码中修掉）**
+
+1. `resourceMetadata.resource` 必须是绝对 URI，而本地 `http://localhost:8787` 与线上 workers.dev 不同 → provider 不能写死，改为按 origin 惰性构造 + `Map` 缓存。
+2. RFC 9728 的 `/.well-known/oauth-protected-resource/mcp` 变体 provider 只服务「配置的那个精确路径」，另一个会 404 → 在交给 provider 之前先重写到规范路径，两条都能 200。
+3. ChatGPT 可能把 `resource` 报成 `origin/mcp`，而我们配置的是 `origin`（与原版一致）→ `/authorize` 的 query 与 `/token` 的 form body 两处都归一到 `origin`，否则 `invalid_target`。
+4. 未注册的 UUID `client_id` 会让 `parseAuthRequest` 直接 `invalid_request` → 在解析前按请求的 `redirect_uri`（仅接受 https / loopback）补一条 `client:<id>` 记录。
+5. `McpServer.registerTool` 只收 StandardSchema（zod），而我们是抓来的原生 JSON Schema → 改用低层 `Server` 的 `setRequestHandler('tools/list', …)` 原样透传，不做 JSON↔zod 转换。
+
 ---
 
 ## 10. 免费额度与用量预估
@@ -304,11 +324,13 @@ Cloudflare Free：Workers 请求量充足。
 
 1. **端到端联调** —— 协议兼容性只能真机暴露（最大风险）。
    - 设备侧协议（`/mcp-info`、`/device/*`、GoTrue session、Realtime private channel + presence）**已真机验证通过**；
-   - 仍未验证：ChatGPT 连接器侧（Step 3/4 之后）。
+   - ChatGPT 侧的 **OAuth + MCP 协议面已在本地按 RFC 顺序全部验证**（`scripts/test-oauth-flow.mjs` 53/53）；
+   - 仍未验证：**真实 ChatGPT 连接器**（需先部署到公网，见 §12），以及 Step 4 的工具转发。
 2. Workers `/mcp` 能否 `await` 到 5 分钟（调用等待上限）。
 3. private broadcast 的 RLS 策略 —— ✅ 已配置且真机通过（设备成功 `Channel subscribed` + `Presence tracked`，说明 `realtime.messages` 策略与 publication 生效）。
 4. 13MB 级 `result` 经 Workers 传递。
 5. 本机连 Supabase 直连域名偶发 DNS 解析失败（`db.<ref>.supabase.co`），`pg` 直连实测可用；失败时重试即可。
+6. **Bundle 体积**：`wrangler deploy --dry-run` 实测 `971 KiB / gzip 199 KiB`，离 Workers 免费版 1 MiB 上限只剩约 5%。Step 4 不再引入重依赖就没问题，但每次加依赖后要看一眼这个数。
 
 ---
 
@@ -324,11 +346,16 @@ npm run dev               # wrangler dev → http://localhost:8787（读 .dev.va
 
 > 迁移执行器用 Node `pg` 直连 `DATABASE_URL`（本机无 brew/psql，故不依赖 psql）。
 
-Step 2 自测（需先 `npm run dev`）：
+Step 2 / Step 3 自测（需先 `npm run dev`）：
 
 ```bash
-node scripts/test-device-flow.mjs              # 14 项断言，覆盖配对全流程
+node scripts/test-device-flow.mjs   # 14 项断言，覆盖设备配对全流程
+node scripts/test-oauth-flow.mjs    # 53 项断言，覆盖 ChatGPT 侧 OAuth + MCP 全流程
+npm run tools:capture               # 重抓设备端工具定义 → tools.captured.json
 ```
+
+> `test-oauth-flow.mjs` 走的是 ChatGPT 的真实顺序：`POST /mcp` 401 拿 `resource_metadata` → RFC 9728/8414 discovery
+> → RFC 7591 DCR → `GET/POST /authorize` 密码页 → `/token` 换 code → `initialize` → `tools/list`(=29) → `tools/call`。
 
 真机联调（设备侧）：
 
@@ -339,10 +366,16 @@ MCP_SERVER_URL=http://localhost:8787 npx @wonderwhy-er/desktop-commander@latest 
 
 MCP 端点调试用 MCP Inspector 连 `http://localhost:8787/mcp`。
 
+部署（Step 5 用，本地开发不需要）：
+
 ```bash
 npx wrangler login
+npx wrangler kv namespace create OAUTH_KV   # 把返回的 id 填进 wrangler.jsonc 的 kv_namespaces
+# 生产环境变量：SUPABASE_* / AUTH_PASSWORD / USER_ID / USER_EMAIL 逐个 wrangler secret put
 npm run deploy
 ```
+
+> 没有 `wrangler login` 前无法建 KV、也无法部署——这是 Step 5 唯一的外部依赖。
 
 ### 网络备注（本机）
 
