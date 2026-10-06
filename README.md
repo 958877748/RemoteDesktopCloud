@@ -15,7 +15,7 @@ npx @wonderwhy-er/desktop-commander remote ◀───────────�
 - 设备端认领任务、执行、写回结果，Worker 轮询返回给 ChatGPT。
 - 单用户、2-3 台设备，**免费方案**（Cloudflare Free + Supabase Free，¥0）。
 
-> 状态：架构与三项关键决策已敲定（见 §8）。**进度：Step 1 已完成**（Supabase 建表 + RLS + 清扫函数），进行中为 Step 2。实时进度见 §9。
+> 状态：架构与三项关键决策已敲定（见 §8）。**进度：Step 1 ✅ Step 2 ✅ 均已完成**（建表 → 设备授权流，真机已跑通），进行中为 Step 3。实时进度见 §9。
 
 ---
 
@@ -51,14 +51,15 @@ npx @wonderwhy-er/desktop-commander remote ◀───────────�
 
 现成组件：`@cloudflare/workers-oauth-provider` 覆盖 OAuth 2.1 + DCR + RFC 8414；`createMcpHandler`（`agents/mcp/server`）覆盖 Streamable HTTP。
 
-### 设备端注入点
+### 设备端注入点（✅ 已实现并真机验证）
 
 | 端点 | 说明 |
 |---|---|
-| `GET /api/mcp-info` | 返回 `supabaseUrl`、`supabasePublishableKey` 等 |
-| `POST /device/start` | 发起设备配对，返回 `verification_uri` + `user_code` |
-| `GET /device/verify` | 用户在浏览器输入 `AUTH_PASSWORD` + 配对码确认（乙方案，同 `/authorize` 共用密码页组件） |
-| `POST /device/poll` | 轮询配对结果，**必须返回 GoTrue 签发的 `access_token`/`refresh_token`** |
+| `GET /api/mcp-info` | 返回 `supabaseUrl`、`supabasePublishableKey`、`mcpServerUrl`、`version` |
+| `POST /device/start` | 收 S256 `code_challenge`，返回 `device_code` + `user_code`(`XXXX-XXXX`) + `verification_uri(_complete)` + `expires_in:600` + `interval:5` |
+| `GET /device/verify` | 密码 + 配对码页面（乙方案，同 `/authorize` 共用密码校验） |
+| `POST /device/verify` | 校验 `AUTH_PASSWORD` 与配对码 → 建 `mcp_devices` 行 → 置 `approved` |
+| `POST /device/poll` | pending → `{error:'authorization_pending'}`(400)；批准 → 校验 PKCE → GoTrue password grant → 返回 token + `device_id`（码用后即焚） |
 
 > ⚠️ 关键约束：`/device/poll` 的 token 若非 GoTrue 签发，设备端 `client.auth.setSession()` 直接失败 → 设备授权流必须与 GoTrue 桥接。
 
@@ -209,31 +210,32 @@ ChatGPT 端看到的全部工具 = `server.ts` 的 25 个（`get_prompts` 不暴
 | `DATABASE_URL` | Postgres 直连串，**仅本地跑迁移用**，不配进 Worker |
 | `SUPABASE_JWT_SECRET` / GoTrue 配置 | 校验设备 token、桥接授权流 |
 | `OAUTH_SIGNING_KEY` | `@cloudflare/workers-oauth-provider` 签名 |
-| `AUTH_PASSWORD` | `/authorize` 页面用的简单密码（已选乙方案，见 §8） |
-| `USER_ID` | 唯一用户的 UUID，乙方案下直接硬编码进 OAuth token（Step 2 创建 auth 用户后填入） |
+| `AUTH_PASSWORD` | `/device/verify` 与 `/authorize` 的密码，同时是 GoTrue 唯一用户的密码（乙方案，见 §8） |
+| `USER_EMAIL` | GoTrue 唯一用户邮箱，`/device/poll` 用 password grant 换真 token |
+| `USER_ID` | 唯一用户的 UUID（`56d074bb-5421-45c1-aac3-600f2cb790e7`），乙方案下硬编码进 OAuth token |
 
 真实值只存本地 `.env`（已 gitignore），仓库里只有 `.env.example` 模板。
 
 ---
 
-## 7. 仓库现状与改造清单
+## 7. 仓库现状与改造清单（✅ 已完成）
 
-现状：本仓库原为另一项目 `personal-agent-mcp`（`cloudflare-html2sprite-mcp`），需推倒重来，骨架可留。
+原为另一项目 `personal-agent-mcp`（`cloudflare-html2sprite-mcp`），已推倒重来：
 
 **保留**
 
-- `src/index.ts` 第 1 行 `import { createMcpHandler } from "agents/mcp/server"`
-- `wrangler.jsonc`（`nodejs_compat`、`compatibility_date`）
+- `src/index.ts` 的 `import { createMcpHandler } from "agents/mcp/server"` 骨架（`/mcp` 仍挂空壳，Step 3 填工具）
+- `wrangler.jsonc`（`nodejs_compat`、`compatibility_date`），name 改为 `remotedesktopcloud`
 
-**删除**
+**已删除**
 
-- `src/runtime/{registry,session,transport}.ts`（死代码）
+- `src/runtime/{registry,session,transport,durable-object}.ts`（死代码）
 - `wrangler.toml` —— 与 `wrangler.jsonc` 双配置冲突，`wrangler.jsonc` 优先导致 `env.RUNTIME_SESSIONS` 为 undefined，旧版三个工具全挂
 
-**重写**
+**已重写**
 
-- 全部业务逻辑（旧版 `sprite_test` 工具、DO 绑定等一并清除）
-- `package.json` 改名 `remotedesktopcloud`，加 `@cloudflare/workers-oauth-provider`
+- 业务逻辑全部重写为 `src/{env,supabase,device-auth,index}.ts`
+- `package.json` 改名 `remotedesktopcloud`，新增 `@modelcontextprotocol/server@^2`（`createMcpHandler` 期望的 `McpServer` 来自它，不是 `@modelcontextprotocol/sdk`）
 
 ---
 
@@ -251,9 +253,9 @@ ChatGPT 端看到的全部工具 = `server.ts` 的 25 个（`get_prompts` 不暴
 
 | # | 步骤 | 状态 |
 |---|---|---|
-| 1 | schema + RLS + 清扫（sweep） | ✅ **已完成**（`0001_init.sql` 已应用并反查验证） |
-| 2 | **设备授权流**（`/api/mcp-info` + `/device/start\|verify\|poll` + GoTrue 桥接）→ 先让设备连上 | ⬅ **进行中** |
-| 3 | `/mcp` + OAuth（RFC 8414/9728/7591、PKCE、29 工具静态注册）→ 再让 ChatGPT 能调 | 待办 |
+| 1 | schema + RLS + 清扫（sweep） | ✅ **已完成**（`0001_init.sql` + `0002_device_codes.sql` 已应用并反查验证） |
+| 2 | **设备授权流**（`/api/mcp-info` + `/device/start\|verify\|poll` + GoTrue 桥接）→ 先让设备连上 | ✅ **已完成，真机跑通**（官方 npm 包 → 本地 Worker → Supabase，`Channel subscribed` + `Presence tracked` + `online`） |
+| 3 | `/mcp` + OAuth（RFC 8414/9728/7591、PKCE、29 工具静态注册）→ 再让 ChatGPT 能调 | ⬅ **进行中** |
 | 4 | 核心链路（落库 → 广播 → 等结果 → 返回） | 待办 |
 | 5 | 端到端联调 | 待办 |
 
@@ -263,6 +265,23 @@ ChatGPT 端看到的全部工具 = `server.ts` 的 25 个（`get_prompts` 不暴
 - `scripts/migrate.mjs` — 迁移执行器（读 `.env` 的 `DATABASE_URL`，顺序执行、记录 `schema_migrations`、失败回滚）
 - `.gitignore` + `.env.example` — 密钥不入库
 - 验证方式：反查 `information_schema` / `pg_indexes` / `pg_policies` / `pg_publication_rel` / `pg_proc`，并实跑一次 `sweep_remote_calls()`
+
+### Step 2 交付物（已完成）
+
+- `supabase/migrations/0002_device_codes.sql` — 配对码表（RLS 开启、零策略 = 只有 Worker 可见）
+- `src/env.ts` — 环境变量定义与校验
+- `src/supabase.ts` — REST/GoTrue 最小封装（service_role 建表行、password grant 签发 token）
+- `src/device-auth.ts` — 四个端点 + 验证页（PKCE S256、常量时间密码比较、码用后即焚）
+- `src/index.ts` — 路由；旧 `src/runtime/*` 与 `wrangler.toml` 已删
+- `scripts/test-device-flow.mjs` — 14 项自测（**14/14 通过**）
+- 真机验证：`MCP_SERVER_URL=http://localhost:8787 npx @wonderwhy-er/desktop-commander@latest remote` → 设备 `online`，`capabilities = {app_version:0.2.52, transport_broadcast_v1:true}`
+
+**踩过的坑（已在代码中修掉）**
+
+1. `verify` 与 `poll` 各自建行 → 一次配对产生 2 个设备行。改为 `poll` 优先读 `verify` 写入的 `approved_device_id`，并给 `verify` 加幂等。
+2. `@modelcontextprotocol/sdk` 的 `McpServer` 与 `agents/mcp/server` 期望的类型不兼容 → 改用 `@modelcontextprotocol/server`。
+3. 本机 `crypto.subtle.digest` 无同步 API → `verifyPkce` 改 async。
+4. 客户端有持久化的旧 session/设备 id（`Invalid Refresh Token` 属预期），会走完整重新配对流程——服务端必须容忍并复用仍存在的设备行。
 
 **明确不做**：控制台网页、账单、遥测、feature flags、多租户（数据直接用 Supabase Studio 看）。
 
@@ -284,8 +303,10 @@ Cloudflare Free：Workers 请求量充足。
 ## 11. 已知技术风险
 
 1. **端到端联调** —— 协议兼容性只能真机暴露（最大风险）。
+   - 设备侧协议（`/mcp-info`、`/device/*`、GoTrue session、Realtime private channel + presence）**已真机验证通过**；
+   - 仍未验证：ChatGPT 连接器侧（Step 3/4 之后）。
 2. Workers `/mcp` 能否 `await` 到 5 分钟（调用等待上限）。
-3. private broadcast 的 RLS 策略 —— ✅ 已配置（`realtime.messages` 两条策略 + publication），待真机验证。
+3. private broadcast 的 RLS 策略 —— ✅ 已配置且真机通过（设备成功 `Channel subscribed` + `Presence tracked`，说明 `realtime.messages` 策略与 publication 生效）。
 4. 13MB 级 `result` 经 Workers 传递。
 5. 本机连 Supabase 直连域名偶发 DNS 解析失败（`db.<ref>.supabase.co`），`pg` 直连实测可用；失败时重试即可。
 
@@ -298,15 +319,22 @@ cp .env.example .env      # 填好各变量（.env 已被 gitignore）
 npm install
 npm run migrate           # 执行 supabase/migrations/*.sql
 npm run migrate:status    # 只看哪些还没跑
-npm run dev               # wrangler dev → http://localhost:8787
+npm run dev               # wrangler dev → http://localhost:8787（读 .dev.vars，同样不入库）
 ```
 
 > 迁移执行器用 Node `pg` 直连 `DATABASE_URL`（本机无 brew/psql，故不依赖 psql）。
 
-设备侧联调：
+Step 2 自测（需先 `npm run dev`）：
+
+```bash
+node scripts/test-device-flow.mjs              # 14 项断言，覆盖配对全流程
+```
+
+真机联调（设备侧）：
 
 ```bash
 MCP_SERVER_URL=http://localhost:8787 npx @wonderwhy-er/desktop-commander@latest remote
+# 终端会打印 verification_uri_complete 与配对码，浏览器打开并输入 AUTH_PASSWORD 即可
 ```
 
 MCP 端点调试用 MCP Inspector 连 `http://localhost:8787/mcp`。
