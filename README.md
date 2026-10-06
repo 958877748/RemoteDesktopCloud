@@ -15,7 +15,7 @@ npx @wonderwhy-er/desktop-commander remote ◀───────────�
 - 设备端认领任务、执行、写回结果，Worker 轮询返回给 ChatGPT。
 - 单用户、2-3 台设备，**免费方案**（Cloudflare Free + Supabase Free，¥0）。
 
-> 状态：架构与三项关键决策已全部敲定（见 §8），**尚未开始编码**。本 README 即为对齐后的设计文档，开发顺序见 §9。
+> 状态：架构与三项关键决策已敲定（见 §8）。**进度：Step 1 已完成**（Supabase 建表 + RLS + 清扫函数），进行中为 Step 2。实时进度见 §9。
 
 ---
 
@@ -70,16 +70,48 @@ npx @wonderwhy-er/desktop-commander remote ◀───────────�
 
 ## 3. 数据模型（Supabase）
 
+唯一事实来源：`supabase/migrations/0001_init.sql`（已应用到 `zdtxqyonglqnyrwayins`）。
+
 ```sql
 mcp_devices(
-  id, user_id, device_name, capabilities, status, last_seen
+  id            uuid pk default gen_random_uuid()
+  user_id       uuid not null default auth.uid() → auth.users(id)
+  device_name   text not null default 'device'
+  capabilities  jsonb not null default '{}'
+  status        text not null default 'offline'
+  last_seen     timestamptz not null default now()
+  created_at    timestamptz not null default now()
 )
 
 mcp_remote_calls(
-  id, user_id, device_id, tool_name, tool_args, metadata,
-  status, result, error_message, created_at, completed_at, timeout_at
+  id            uuid pk default gen_random_uuid()
+  user_id       uuid not null default auth.uid() → auth.users(id)
+  device_id     uuid not null → mcp_devices(id)
+  tool_name     text not null
+  tool_args     jsonb not null default '{}'
+  metadata      jsonb not null default '{}'
+  status        text not null default 'pending'   -- pending|executing|completed|failed
+  result        jsonb
+  error_message text
+  created_at    timestamptz not null default now()
+  completed_at  timestamptz
+  timeout_at    timestamptz not null default now() + interval '5 minutes'
 )
 ```
+
+**索引**：`mcp_remote_calls_claim_idx`（`device_id, created_at` where `status='pending'`，认领用）、
+`mcp_remote_calls_sweep_idx`（清扫用）、`mcp_remote_calls_user_idx`、`mcp_devices_user_id_idx`、`mcp_devices_last_seen_idx`。
+
+**RLS（7 条策略，均已实测存在于 `pg_policies`）**
+
+| 表 | 策略 | 角色 | 规则 |
+|---|---|---|---|
+| `mcp_devices` | select/insert/update own | authenticated | `user_id = auth.uid()` |
+| `mcp_remote_calls` | select/update own | authenticated | `user_id = auth.uid()`（pending+timeout 由调用方 WHERE 保证 exactly-once） |
+| `realtime.messages` | select/insert own topic | authenticated | `topic = 'user:' \|\| auth.uid()` ← 防 `CHANNEL_ERROR` |
+
+Worker 侧走 `service_role`（bypass RLS），不受上表约束。
+`realtime.messages` 已加入 `supabase_realtime` publication（分区表，`pg_publication_tables` 查不到，需查 `pg_publication_rel`）。
 
 ### 状态机与 exactly-once
 
@@ -100,6 +132,15 @@ pending ──(设备条件 UPDATE 认领)──▶ executing ──▶ complete
 | 服务端清扫档位 | 15 min | 45 s |
 
 token 45 分钟自刷新；`capabilities = { app_version, transport_broadcast_v1?: true }`。
+
+### 清扫函数 `public.sweep_remote_calls()`（已建，实测可执行）
+
+1. 过期 `pending`（`timeout_at < now()`）→ `failed` + `error_message='timeout...'`
+2. 终态行 `completed_at < now()-1min` → 删除
+3. `created_at < now()-1h` → 兜底删除
+4. 设备 `last_seen` 超档位 → `status='offline'`（15min / 45s 两档）
+
+调用方式：`select public.sweep_remote_calls()`（`security definer`，由 Worker cron 或 pg_cron 触发）。
 
 ### Realtime
 
@@ -162,13 +203,16 @@ ChatGPT 端看到的全部工具 = `server.ts` 的 25 个（`get_prompts` 不暴
 
 | 变量 | 说明 |
 |---|---|
-| `SUPABASE_URL` | 托管 Supabase 项目地址 |
+| `SUPABASE_URL` | `https://zdtxqyonglqnyrwayins.supabase.co` |
 | `SUPABASE_PUBLISHABLE_KEY` | `sb_publishable_...`，经 `/api/mcp-info` 下发 |
-| `SUPABASE_SERVICE_ROLE_KEY` | 服务端写表、清扫（仅 Worker 持有） |
+| `SUPABASE_SERVICE_ROLE_KEY` | `sb_secret_...`，服务端写表、清扫（仅 Worker 持有） |
+| `DATABASE_URL` | Postgres 直连串，**仅本地跑迁移用**，不配进 Worker |
 | `SUPABASE_JWT_SECRET` / GoTrue 配置 | 校验设备 token、桥接授权流 |
 | `OAUTH_SIGNING_KEY` | `@cloudflare/workers-oauth-provider` 签名 |
 | `AUTH_PASSWORD` | `/authorize` 页面用的简单密码（已选乙方案，见 §8） |
-| `USER_ID` | 唯一用户的 UUID，乙方案下直接硬编码进 OAuth token |
+| `USER_ID` | 唯一用户的 UUID，乙方案下直接硬编码进 OAuth token（Step 2 创建 auth 用户后填入） |
+
+真实值只存本地 `.env`（已 gitignore），仓库里只有 `.env.example` 模板。
 
 ---
 
@@ -205,11 +249,20 @@ ChatGPT 端看到的全部工具 = `server.ts` 的 25 个（`get_prompts` 不暴
 
 ## 9. MVP 清单（顺序已定，倒着做）
 
-1. schema + RLS + 清扫（sweep）
-2. **设备授权流**（`/api/mcp-info` + `/device/start|verify|poll` + GoTrue 桥接）→ 先让设备连上
-3. `/mcp` + OAuth（RFC 8414/9728/7591、PKCE、29 工具静态注册）→ 再让 ChatGPT 能调
-4. 核心链路（落库 → 广播 → 等结果 → 返回）
-5. 端到端联调
+| # | 步骤 | 状态 |
+|---|---|---|
+| 1 | schema + RLS + 清扫（sweep） | ✅ **已完成**（`0001_init.sql` 已应用并反查验证） |
+| 2 | **设备授权流**（`/api/mcp-info` + `/device/start\|verify\|poll` + GoTrue 桥接）→ 先让设备连上 | ⬅ **进行中** |
+| 3 | `/mcp` + OAuth（RFC 8414/9728/7591、PKCE、29 工具静态注册）→ 再让 ChatGPT 能调 | 待办 |
+| 4 | 核心链路（落库 → 广播 → 等结果 → 返回） | 待办 |
+| 5 | 端到端联调 | 待办 |
+
+### Step 1 交付物（已完成）
+
+- `supabase/migrations/0001_init.sql` — 建表 / 索引 / 7 条 RLS 策略 / Realtime publication / `sweep_remote_calls()`
+- `scripts/migrate.mjs` — 迁移执行器（读 `.env` 的 `DATABASE_URL`，顺序执行、记录 `schema_migrations`、失败回滚）
+- `.gitignore` + `.env.example` — 密钥不入库
+- 验证方式：反查 `information_schema` / `pg_indexes` / `pg_policies` / `pg_publication_rel` / `pg_proc`，并实跑一次 `sweep_remote_calls()`
 
 **明确不做**：控制台网页、账单、遥测、feature flags、多租户（数据直接用 Supabase Studio 看）。
 
@@ -232,17 +285,23 @@ Cloudflare Free：Workers 请求量充足。
 
 1. **端到端联调** —— 协议兼容性只能真机暴露（最大风险）。
 2. Workers `/mcp` 能否 `await` 到 5 分钟（调用等待上限）。
-3. private broadcast 的 RLS 策略配置。
+3. private broadcast 的 RLS 策略 —— ✅ 已配置（`realtime.messages` 两条策略 + publication），待真机验证。
 4. 13MB 级 `result` 经 Workers 传递。
+5. 本机连 Supabase 直连域名偶发 DNS 解析失败（`db.<ref>.supabase.co`），`pg` 直连实测可用；失败时重试即可。
 
 ---
 
 ## 12. 本地开发
 
 ```bash
+cp .env.example .env      # 填好各变量（.env 已被 gitignore）
 npm install
-npm run dev          # wrangler dev → http://localhost:8787
+npm run migrate           # 执行 supabase/migrations/*.sql
+npm run migrate:status    # 只看哪些还没跑
+npm run dev               # wrangler dev → http://localhost:8787
 ```
+
+> 迁移执行器用 Node `pg` 直连 `DATABASE_URL`（本机无 brew/psql，故不依赖 psql）。
 
 设备侧联调：
 
