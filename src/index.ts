@@ -1,83 +1,73 @@
 import { createMcpHandler } from "agents/mcp/server";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { z } from "zod";
-import { RuntimeSession } from "./runtime/durable-object";
+import { McpServer } from "@modelcontextprotocol/server";
+import type { Env } from "./env.js";
+import { requireEnv } from "./env.js";
+import {
+  handleDevicePoll,
+  handleDeviceStart,
+  handleDeviceVerify,
+  handleMcpInfo,
+} from "./device-auth.js";
 
-function createServer(env: Env) {
-  const server = new McpServer({ name: "personal-agent-mcp", version: "0.1.0" });
-
-  server.registerTool("runtime_info", {
-    description: "Get the connection status of a local Personal Agent Runtime.",
-    inputSchema: { runtimeId: z.string().min(1) },
-  }, async ({ runtimeId }) => {
-    const id = env.RUNTIME_SESSIONS.idFromName(runtimeId);
-    const response = await env.RUNTIME_SESSIONS.get(id).fetch("https://runtime-session/status");
-    return { content: [{ type: "text", text: JSON.stringify(await response.json()) }] };
-  });
-
-  server.registerTool("discover", {
-    description: "Discover a local runtime and its capabilities.",
-    inputSchema: { runtimeId: z.string().min(1) },
-  }, async ({ runtimeId }) => {
-    const id = env.RUNTIME_SESSIONS.idFromName(runtimeId);
-    const response = await env.RUNTIME_SESSIONS.get(id).fetch("https://runtime-session/status");
-    return { content: [{ type: "text", text: JSON.stringify(await response.json()) }] };
-  });
-
-  server.registerTool("execute_runtime", {
-    description: "Execute JavaScript on a connected user's local Personal Agent Runtime.",
-    inputSchema: {
-      runtimeId: z.string().min(1),
-      code: z.string().min(1),
-    },
-  }, async ({ runtimeId, code }) => {
-    const id = env.RUNTIME_SESSIONS.idFromName(runtimeId);
-    const stub = env.RUNTIME_SESSIONS.get(id);
-    const requestId = crypto.randomUUID();
-    const response = await stub.fetch("https://runtime-session/command", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ requestId, runtimeId, code }),
-    });
-
-    return {
-      content: [{
-        type: "text",
-        text: JSON.stringify(await response.json()),
-      }],
-    };
-  });
-
-  return server;
+/**
+ * MCP 服务端。Step 3 会在这里静态注册 29 个 DesktopCommander 工具；
+ * 目前先挂空壳，保证 /mcp 的 Streamable HTTP 传输与骨架可用。
+ *
+ * 注意：McpServer 必须来自 `@modelcontextprotocol/server`（agents/mcp/server 的
+ * createMcpHandler 期望的就是这一份类型），不能用 `@modelcontextprotocol/sdk`。
+ */
+function createServer(_env: Env): McpServer {
+  return new McpServer({ name: "remotedesktopcloud", version: "0.1.0" });
 }
 
 const mcpHandler = (request: Request, env: Env, ctx: ExecutionContext) =>
   createMcpHandler(() => createServer(env))(request, env, ctx);
 
+function error(message: string, status = 500): Response {
+  return Response.json({ error: message }, { status });
+}
+
 export default {
-  async fetch(request: Request, env: Env, ctx: ExecutionContext) {
-    const url = new URL(request.url);
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    const { pathname } = new URL(request.url);
 
-    if (url.pathname === "/mcp") return mcpHandler(request, env, ctx);
-
-    if (url.pathname.startsWith("/runtime/")) {
-      const runtimeId = decodeURIComponent(url.pathname.slice("/runtime/".length));
-      if (!runtimeId) return new Response("Missing runtime ID", { status: 400 });
-      const id = env.RUNTIME_SESSIONS.idFromName(runtimeId);
-      return env.RUNTIME_SESSIONS.get(id).fetch(request);
+    try {
+      requireEnv(env);
+    } catch (e: any) {
+      return error(`Configuration error: ${e.message}`, 500);
     }
 
-    return Response.json({
-      name: "personal-agent-mcp",
-      status: "ok",
-      mcpEndpoint: "/mcp",
-      runtimeWebSocketEndpoint: "/runtime/{runtimeId}",
-    });
+    switch (pathname) {
+      case "/mcp":
+        return mcpHandler(request, env, ctx);
+
+      case "/api/mcp-info":
+        return handleMcpInfo(request, env);
+
+      case "/device/start":
+        return request.method === "POST"
+          ? handleDeviceStart(request, env)
+          : error("Method not allowed", 405);
+
+      case "/device/verify":
+        return request.method === "GET" || request.method === "POST"
+          ? handleDeviceVerify(request, env)
+          : error("Method not allowed", 405);
+
+      case "/device/poll":
+        return request.method === "POST"
+          ? handleDevicePoll(request, env)
+          : error("Method not allowed", 405);
+
+      case "/":
+        return Response.json({
+          name: "remotedesktopcloud",
+          status: "ok",
+          endpoints: ["/mcp", "/api/mcp-info", "/device/start", "/device/verify", "/device/poll"],
+        });
+
+      default:
+        return error("Not found", 404);
+    }
   },
 };
-
-export { RuntimeSession };
-
-interface Env {
-  RUNTIME_SESSIONS: DurableObjectNamespace<RuntimeSession>;
-}

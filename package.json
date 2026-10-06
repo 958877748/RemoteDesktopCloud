@@ -1,5 +1,5 @@
 {
-  "name": "personal-agent-mcp",
+  "name": "remotedesktopcloud",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "latest",
+    "@modelcontextprotocol/server": "^2.0.0",
     "agents": "latest",
     "zod": "latest"
   },

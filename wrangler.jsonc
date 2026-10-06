@@ -1,6 +1,6 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "cloudflare-html2sprite-mcp",
+  "name": "remotedesktopcloud",
   "main": "src/index.ts",
   "compatibility_date": "2026-08-01",
   "compatibility_flags": [
