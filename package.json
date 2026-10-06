@@ -5,7 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
-    "deploy": "wrangler deploy"
+    "deploy": "wrangler deploy",
+    "migrate": "node scripts/migrate.mjs",
+    "migrate:status": "node scripts/migrate.mjs --status"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "latest",
@@ -14,6 +16,7 @@
   },
   "devDependencies": {
     "@cloudflare/workers-types": "latest",
+    "pg": "^8.23.1",
     "typescript": "latest",
     "wrangler": "latest"
   }
