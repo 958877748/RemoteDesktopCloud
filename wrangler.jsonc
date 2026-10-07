@@ -8,12 +8,12 @@
   ],
   "workers_dev": true,
   // OAuth provider 的 KV：client / grant / token 记录。
-  // 本地 dev 用 id 当本地命名空间键即可；真正部署前先
-  // `wrangler kv namespace create OAUTH_KV` 再把返回的 id 填回来。
+  // 本地 dev 用同一 id 当本地命名空间键；线上读同一个 namespace。
+  // 重建方式：npx wrangler kv namespace create OAUTH_KV
   "kv_namespaces": [
     {
       "binding": "OAUTH_KV",
-      "id": "local-oauth-kv-placeholder"
+      "id": "46ade2b57ca8477f8b40669516398c0d"
     }
   ]
 }

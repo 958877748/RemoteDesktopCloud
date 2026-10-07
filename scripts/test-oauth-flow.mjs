@@ -11,7 +11,7 @@
  *   7  POST /token                   → access_token
  *   8  POST /mcp initialize          → 200
  *   9  POST /mcp tools/list          → 恰好 29 个工具
- *   10 POST /mcp tools/call          → who_am_i / list_devices 直答，其余给占位
+ *   10 POST /mcp tools/call          → who_am_i / list_devices 直答，其余走 Step 4 转发
  *
  * 用法：node scripts/test-oauth-flow.mjs [baseUrl]
  */
@@ -225,7 +225,13 @@ check(`list_devices 非 isError`, devices.body?.result?.isError !== true, device
 
 const readFile = await call("read_file", { path: "/etc/hostname" });
 check(`read_file 200 (实际 ${readFile.status})`, readFile.status === 200, readFile.raw.slice(0, 300));
-check(`read_file 给出 Step 4 占位`, /Step 4/.test(readFile.body?.result?.content?.[0]?.text ?? ""), readFile.raw.slice(0, 300));
+const readFileText = readFile.body?.result?.content?.[0]?.text ?? "";
+check(`read_file 不再是 Step 4 占位`, !/Step 4/.test(readFileText), readFileText.slice(0, 300));
+check(
+  `read_file 要么在设备上执行、要么给出可读原因`,
+  readFile.body?.result?.isError === true || readFileText.length > 0,
+  readFileText.slice(0, 300),
+);
 
 // --- 附：resource 垫片 --------------------------------------------------------
 section(11, "resource = origin/mcp 垫片（全新一轮 code）");

@@ -11,6 +11,7 @@
     "tools:capture": "node scripts/capture-tools.mjs",
     "test:device": "node scripts/test-device-flow.mjs",
     "test:oauth": "node scripts/test-oauth-flow.mjs",
+    "test:call": "node scripts/test-remote-call.mjs",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

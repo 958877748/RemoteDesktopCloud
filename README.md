@@ -15,7 +15,7 @@ npx @wonderwhy-er/desktop-commander remote ◀───────────�
 - 设备端认领任务、执行、写回结果，Worker 轮询返回给 ChatGPT。
 - 单用户、2-3 台设备，**免费方案**（Cloudflare Free + Supabase Free，¥0）。
 
-> 状态：架构与三项关键决策已敲定（见 §8）。**进度：Step 1 ✅ Step 2 ✅ Step 3 ✅ 均已完成**（建表 → 设备授权流 → `/mcp` + OAuth + 29 工具），进行中为 Step 4。实时进度见 §9。
+> 状态：架构与三项关键决策已敲定（见 §8）。**进度：Step 1 ✅ Step 2 ✅ Step 3 ✅ Step 4 ✅ 均已完成**（建表 → 设备授权流 → `/mcp` + OAuth + 29 工具 → 核心转发链路真机跑通），进行中为 Step 5。实时进度见 §9。
 
 ---
 
@@ -38,7 +38,7 @@ npx @wonderwhy-er/desktop-commander remote ◀───────────�
 
 ## 2. 端点清单
 
-### ChatGPT 硬性要求（✅ 已实现，`scripts/test-oauth-flow.mjs` 53/53 通过）
+### ChatGPT 硬性要求（✅ 已实现，`scripts/test-oauth-flow.mjs` 54/54 通过）
 
 | 端点 | 规范 | 说明 |
 |---|---|---|
@@ -148,8 +148,11 @@ token 45 分钟自刷新；`capabilities = { app_version, transport_broadcast_v1
 
 - 私有频道：`user:${user_id}`，presence key = deviceId。
 - 广播事件 `new_call`，载荷**只有** `{call_id, device_id}`。
-- 服务端发广播走 REST：`POST https://{ref}.supabase.co/realtime/v1/api/broadcast`，body `{messages:[{topic,event,payload,private:true}]}` → 202。
-  - **只能带 `apikey` 头，带空 `Authorization` 会 500**（supabase/supabase-js#1936）。
+- 服务端发广播走 REST：`POST https://{ref}.supabase.co/realtime/v1/api/broadcast`，body `{messages:[{topic,event,payload,private:true}]}`。
+  - **必须同时带 `apikey` 和「用户」的 GoTrue JWT**（`Authorization: Bearer <access_token>`）。
+  - 实测坑：只带 `apikey` 会回 **202 但消息被静默丢弃**——私有频道要写 `realtime.messages`，过 RLS `topic = 'user:' || auth.uid()`，没有用户 JWT 时 `auth.uid()` 为空、策略不放行，而接口照样回 202。用 `scripts/probe-broadcast.mjs real-apikey / real-jwt` 可复现（前者 20s 后仍是 `pending`，后者 `completed`）。
+  - 旧笔记「带空 `Authorization` 会 500」（supabase/supabase-js#1936）说的是**空串**，与上面这条不冲突。
+  - 因此 `src/calls.ts` **没有降级到只带 apikey 的分支**：JWT 拿不到就立刻报错，不让 ChatGPT 白等 4 分钟超时。
 
 ---
 
@@ -165,20 +168,28 @@ token 45 分钟自刷新；`capabilities = { app_version, transport_broadcast_v1
 设备 ─▶ 写 mcp_devices 行，连 Realtime 频道 user:{id}，开始心跳
 ```
 
-### 时序 B：一次工具调用
+### 时序 B：一次工具调用（✅ Step 4 已实现，`src/calls.ts`）
 
 ```
 ChatGPT ─▶ POST /mcp (tools/call)
+Worker  ─▶ 选一台在线设备（listDevices，按 last_seen 倒序）
 Worker  ─▶ INSERT mcp_remote_calls (status=pending, timeout_at=+5min)
 Worker  ─▶ POST realtime/v1/api/broadcast  event=new_call {call_id, device_id}
-Worker  ─▶ 轮询该行（等待终态或超时）
+Worker  ─▶ 轮询该行（500ms 一次，等到终态或 240s 上限）
 设备    ─▶ 条件 UPDATE 认领 → executing → 本地执行 → 写回 completed/failed
-Worker  ─▶ 返回 result 给 ChatGPT
+Worker  ─▶ 返回 result（或 isError + 原因）给 ChatGPT
 ```
+
+要点：
+
+- **投递前先挑设备**：没有 `online` 的设备立刻报错并列出各设备状态，不浪费 5 分钟。
+- **定向投递**：`_meta.device_id` 可指定机器（不存在/不在线也立刻报错）；缺省用最近活跃的那台。
+- **等不到就明说**：超时 / 广播失败 / 轮询 REST 连挂 5 次，都返回 `isError` 文字原因（按 MCP 规范，工具执行失败要让模型读到原因，而不是抛 JSON-RPC error）。
+- **清扫兜底**：Worker 没挂 cron，每次投递前节流（≥10 分钟一次）执行 `purgeRemoteCalls()`，等价于 `sweep_remote_calls()` 里跟调用表有关的两条。
 
 ---
 
-## 5. 工具清单（✅ 已静态注册，29/29）
+## 5. 工具清单（✅ 已静态注册 29/29，且全部接通转发）
 
 ChatGPT 端看到的全部工具 = `server.ts` 的 25 个（`get_prompts` 不暴露）+ 4 个 remote 专属。
 `inputSchema` **零手抄**：`scripts/capture-tools.mjs` 直接把官方 npm 包当 stdio server 跑起来、抓 `tools/list`
@@ -257,9 +268,9 @@ ChatGPT 端看到的全部工具 = `server.ts` 的 25 个（`get_prompts` 不暴
 |---|---|---|
 | 1 | schema + RLS + 清扫（sweep） | ✅ **已完成**（`0001_init.sql` + `0002_device_codes.sql` 已应用并反查验证） |
 | 2 | **设备授权流**（`/api/mcp-info` + `/device/start\|verify\|poll` + GoTrue 桥接）→ 先让设备连上 | ✅ **已完成，真机跑通**（官方 npm 包 → 本地 Worker → Supabase，`Channel subscribed` + `Presence tracked` + `online`） |
-| 3 | `/mcp` + OAuth（RFC 8414/9728/7591、PKCE、29 工具静态注册）→ 再让 ChatGPT 能调 | ✅ **已完成**（本地全链路 53/53 通过：401→discovery→DCR→authorize→token→initialize→`tools/list`=29） |
-| 4 | 核心链路（落库 → 广播 → 等结果 → 返回） | 待办 |
-| 5 | 端到端联调 | 待办 |
+| 3 | `/mcp` + OAuth（RFC 8414/9728/7591、PKCE、29 工具静态注册）→ 再让 ChatGPT 能调 | ✅ **已完成**（本地全链路 54/54 通过：401→discovery→DCR→authorize→token→initialize→`tools/list`=29） |
+| 4 | 核心链路（落库 → 广播 → 等结果 → 返回） | ✅ **已完成，真机跑通**（`scripts/test-remote-call.mjs` 21/21：ping / get_usage_stats / read_file 真执行，失败与定向投递也正确） |
+| 5 | 端到端联调 | 进行中 |
 
 ### Step 1 交付物（已完成）
 
@@ -291,11 +302,11 @@ ChatGPT 端看到的全部工具 = `server.ts` 的 25 个（`get_prompts` 不暴
 
 - `scripts/capture-tools.mjs` + `tools.captured.json` — 从官方 npm 包的 dist 抓 26 个工具的 `name/description/inputSchema/annotations/_meta`（重跑即可同步设备端）
 - `src/tools.ts` — 29 个工具注册表 = 抓来的 25（滤掉 `get_prompts`）+ 4 个 remote 专属
-- `src/mcp.ts` — 低层 `Server` + `setRequestHandler('tools/list'|'tools/call')`；`who_am_i` / `list_devices` 云端直答，其余 27 个返回 Step 4 占位
+- `src/mcp.ts` — 低层 `Server` + `setRequestHandler('tools/list'|'tools/call')`；`who_am_i` / `list_devices` 云端直答，其余 27 个转交 `src/calls.ts`（Step 4 接通）
 - `src/oauth.ts` — `OAuthProvider` 按 origin 惰性构造并缓存；`/authorize` 密码页（`parseAuthRequest` → 校验 `AUTH_PASSWORD` → `completeAuthorization`，props 写入 `userId`/`email`）
 - `src/index.ts` — 改为 provider 出口：先做 PRM `/mcp` 后缀别名与 token `resource` 归一化，再交给 `OAuthProvider.fetch`
-- `wrangler.jsonc` — 新增 `OAUTH_KV` 绑定（本地用占位 id；部署前须 `wrangler kv namespace create OAUTH_KV` 换真 id）
-- `scripts/test-oauth-flow.mjs` — 12 节 53 项断言，**53/53 通过**（Step 2 的 14 项回归也照旧全绿）
+- `wrangler.jsonc` — 新增 `OAUTH_KV` 绑定（真 id `46ade2b57ca8477f8b40669516398c0d`，已 `wrangler kv namespace create OAUTH_KV` 建好；要重建就重跑这条命令再把 id 填回来）
+- `scripts/test-oauth-flow.mjs` — 12 节 54 项断言（Step 4 把「占位」改成「真转发」多加 1 项），**54/54 通过**（Step 2 的 14 项回归也照旧全绿）
 
 **踩过的坑（已在代码中修掉）**
 
@@ -304,6 +315,33 @@ ChatGPT 端看到的全部工具 = `server.ts` 的 25 个（`get_prompts` 不暴
 3. ChatGPT 可能把 `resource` 报成 `origin/mcp`，而我们配置的是 `origin`（与原版一致）→ `/authorize` 的 query 与 `/token` 的 form body 两处都归一到 `origin`，否则 `invalid_target`。
 4. 未注册的 UUID `client_id` 会让 `parseAuthRequest` 直接 `invalid_request` → 在解析前按请求的 `redirect_uri`（仅接受 https / loopback）补一条 `client:<id>` 记录。
 5. `McpServer.registerTool` 只收 StandardSchema（zod），而我们是抓来的原生 JSON Schema → 改用低层 `Server` 的 `setRequestHandler('tools/list', …)` 原样透传，不做 JSON↔zod 转换。
+
+### Step 4 交付物（已完成）
+
+- `src/calls.ts` — 核心链路：挑设备 → `INSERT mcp_remote_calls` → 广播 `new_call` → 500ms 轮询到终态 → 还原 `CallToolResult`。含 NUL 清洗（jsonb/text 都存不了 U+0000）、GoTrue session 复用、清扫节流。
+- `src/supabase.ts` — 新增 `insertRemoteCall`（`Prefer: return=representation` 拿 DB 时钟的 `timeout_at`）/ `getRemoteCall` / `purgeRemoteCalls`
+- `src/mcp.ts` — `Result` 类型换成真正的 `CallToolResult`；`tools/call` 取出 `_meta`，27 个工具全部转交 `dispatchCall`
+- `scripts/test-remote-call.mjs` — 端到端 21 项断言（**21/21 通过**）
+- `scripts/probe-broadcast.mjs` — 广播送达探针（`real-apikey` / `real-jwt` 两档对照，用来证明「202 ≠ 送达」）
+- `scripts/test-oauth-flow.mjs` — 第 10 节由「占位」断言改为「真转发」断言，**54/54 通过**；`test-device-flow` 14/14 回归也全绿
+- `package.json` — 新增 `npm run test:call`
+
+**真机验证结果**
+
+| 用例 | 结果 |
+|---|---|
+| `ping` | `pong 2026-10-07T02:39:59.471Z`（设备侧特判，全链路 3.8s） |
+| `get_usage_stats` / `read_file` | 设备上真实执行，内容原样回传 |
+| 不存在的工具名 | 设备端 `Unknown tool` → 还原成 `isError` |
+| `_meta.device_id` 指向不存在的设备 | 488ms 立刻报错（不等超时） |
+| `_meta.device_id` 正确 | 照常 `pong` |
+
+**踩过的坑（已在代码中修掉）**
+
+1. **私有频道广播 202 ≠ 送达**：只带 `apikey` 时 Realtime 照样回 202，但消息被 RLS 静默丢弃，设备永远收不到 → 必须带**用户**的 GoTrue JWT。原来 README 记的「只能带 apikey」是错的，已订正（§3）。
+2. 客户端参数里可能有 NUL → 整条 INSERT 报 22P05 → 写入前 `stripNul()` 递归清洗（设备侧写回时做同样的事）。
+3. 设备不在线时如果照常投递，会白等满 5 分钟才超时 → 挑设备这一步先判 `status='online'`，立刻给模型可行动的错误信息。
+4. Worker 没有 cron，`mcp_remote_calls` 的终态行会堆积 → 每次投递前节流跑一次 `purgeRemoteCalls()`。
 
 ---
 
@@ -324,13 +362,15 @@ Cloudflare Free：Workers 请求量充足。
 
 1. **端到端联调** —— 协议兼容性只能真机暴露（最大风险）。
    - 设备侧协议（`/mcp-info`、`/device/*`、GoTrue session、Realtime private channel + presence）**已真机验证通过**；
-   - ChatGPT 侧的 **OAuth + MCP 协议面已在本地按 RFC 顺序全部验证**（`scripts/test-oauth-flow.mjs` 53/53）；
-   - 仍未验证：**真实 ChatGPT 连接器**（需先部署到公网，见 §12），以及 Step 4 的工具转发。
-2. Workers `/mcp` 能否 `await` 到 5 分钟（调用等待上限）。
-3. private broadcast 的 RLS 策略 —— ✅ 已配置且真机通过（设备成功 `Channel subscribed` + `Presence tracked`，说明 `realtime.messages` 策略与 publication 生效）。
+   - ChatGPT 侧的 **OAuth + MCP 协议面已在本地按 RFC 顺序全部验证**（`scripts/test-oauth-flow.mjs` 54/54）；
+   - **Step 4 工具转发已在本地对真设备验证**（`scripts/test-remote-call.mjs` 21/21，ping / 读文件 / 统计 / 失败传播 / 定向投递）；
+   - 仍未验证：**真实 ChatGPT 连接器**（需先部署到公网，见 §12），以及线上 Workers 的长 `await`。
+2. **长等待** —— `/mcp` 里 `tools/call` 会把 HTTP 响应一直挂着轮询（上限 `MAX_WAIT_MS = 240s`，见 `src/calls.ts`）。
+   本地 `wrangler dev` 实测多秒级没问题；**部署到线上 Workers 后能否挂到分钟级、以及 ChatGPT 自己的 HTTP 超时是多少**，要 Step 5 真机才知道。缓解：正常调用都在 3s 内返回，只有长任务才会顶到上限。
+3. private broadcast 的 RLS 策略 —— ✅ 已配置且真机通过（设备成功 `Channel subscribed` + `Presence tracked`；Step 4 进一步验证了「服务端带用户 JWT 发广播 → 设备真的收到并执行」）。
 4. 13MB 级 `result` 经 Workers 传递。
 5. 本机连 Supabase 直连域名偶发 DNS 解析失败（`db.<ref>.supabase.co`），`pg` 直连实测可用；失败时重试即可。
-6. **Bundle 体积**：`wrangler deploy --dry-run` 实测 `971 KiB / gzip 199 KiB`，离 Workers 免费版 1 MiB 上限只剩约 5%。Step 4 不再引入重依赖就没问题，但每次加依赖后要看一眼这个数。
+6. **Bundle 体积**：`wrangler deploy --dry-run` 实测 `978.45 KiB / gzip 201.11 KiB`，离 Workers 免费版 1 MiB 上限只剩约 4.4%（Step 4 加了 `calls.ts`，涨了 7.5 KiB）。以后每加依赖都要看一眼这个数。
 
 ---
 
@@ -346,12 +386,14 @@ npm run dev               # wrangler dev → http://localhost:8787（读 .dev.va
 
 > 迁移执行器用 Node `pg` 直连 `DATABASE_URL`（本机无 brew/psql，故不依赖 psql）。
 
-Step 2 / Step 3 自测（需先 `npm run dev`）：
+Step 2 / 3 / 4 自测（需先 `npm run dev`）：
 
 ```bash
 node scripts/test-device-flow.mjs   # 14 项断言，覆盖设备配对全流程
-node scripts/test-oauth-flow.mjs    # 53 项断言，覆盖 ChatGPT 侧 OAuth + MCP 全流程
+node scripts/test-oauth-flow.mjs    # 54 项断言，覆盖 ChatGPT 侧 OAuth + MCP 全流程
+npm run test:call                   # 21 项断言，Step 4 真机转发（需设备在线）
 npm run tools:capture               # 重抓设备端工具定义 → tools.captured.json
+node scripts/probe-broadcast.mjs real-jwt   # 探针：证明门铃真的送达（real-apikey 会证明「202 ≠ 送达」）
 ```
 
 > `test-oauth-flow.mjs` 走的是 ChatGPT 的真实顺序：`POST /mcp` 401 拿 `resource_metadata` → RFC 9728/8414 discovery
@@ -361,7 +403,8 @@ npm run tools:capture               # 重抓设备端工具定义 → tools.capt
 
 ```bash
 MCP_SERVER_URL=http://localhost:8787 npx @wonderwhy-er/desktop-commander@latest remote
-# 终端会打印 verification_uri_complete 与配对码，浏览器打开并输入 AUTH_PASSWORD 即可
+# 已配对过会直接复用 ~/.desktop-commander-device/device.json；否则打印 verification_uri_complete 与配对码，
+# 浏览器打开并输入 AUTH_PASSWORD 即可
 ```
 
 MCP 端点调试用 MCP Inspector 连 `http://localhost:8787/mcp`。
@@ -369,13 +412,14 @@ MCP 端点调试用 MCP Inspector 连 `http://localhost:8787/mcp`。
 部署（Step 5 用，本地开发不需要）：
 
 ```bash
-npx wrangler login
-npx wrangler kv namespace create OAUTH_KV   # 把返回的 id 填进 wrangler.jsonc 的 kv_namespaces
+npx wrangler login                        # ✅ 已完成
+npx wrangler kv namespace create OAUTH_KV # ✅ 已完成，id 已填进 wrangler.jsonc
 # 生产环境变量：SUPABASE_* / AUTH_PASSWORD / USER_ID / USER_EMAIL 逐个 wrangler secret put
 npm run deploy
 ```
 
-> 没有 `wrangler login` 前无法建 KV、也无法部署——这是 Step 5 唯一的外部依赖。
+> 登录与 KV 都已就绪，Step 5 只剩 `wrangler secret put` × 5 和 `npm run deploy`。
+> 全局敲 `wrangler` 会 `command not found`（只是本地 devDependency），一律用 `npx wrangler ...`。
 
 ### 网络备注（本机）
 
