@@ -15,7 +15,7 @@ npx @wonderwhy-er/desktop-commander remote ◀───────────�
 - 设备端认领任务、执行、写回结果，Worker 轮询返回给 ChatGPT。
 - 单用户、2-3 台设备，**免费方案**（Cloudflare Free + Supabase Free，¥0）。
 
-> 状态：架构与三项关键决策已敲定（见 §8）。**进度：Step 1 ✅ Step 2 ✅ Step 3 ✅ Step 4 ✅ 均已完成**（建表 → 设备授权流 → `/mcp` + OAuth + 29 工具 → 核心转发链路真机跑通），进行中为 Step 5。实时进度见 §9。
+> 状态：架构与三项关键决策已敲定（见 §8）。**进度：Step 1 ✅ Step 2 ✅ Step 3 ✅ Step 4 ✅ 均已完成**；**Step 5 🔶 已部署到 `https://remotedesktopcloud.txdygl.workers.dev`，三套件在生产全绿（54/54 + 14/14 + 21/21）**，只剩真实 ChatGPT 连接器联调。实时进度见 §9。
 
 ---
 
@@ -270,7 +270,7 @@ ChatGPT 端看到的全部工具 = `server.ts` 的 25 个（`get_prompts` 不暴
 | 2 | **设备授权流**（`/api/mcp-info` + `/device/start\|verify\|poll` + GoTrue 桥接）→ 先让设备连上 | ✅ **已完成，真机跑通**（官方 npm 包 → 本地 Worker → Supabase，`Channel subscribed` + `Presence tracked` + `online`） |
 | 3 | `/mcp` + OAuth（RFC 8414/9728/7591、PKCE、29 工具静态注册）→ 再让 ChatGPT 能调 | ✅ **已完成**（本地全链路 54/54 通过：401→discovery→DCR→authorize→token→initialize→`tools/list`=29） |
 | 4 | 核心链路（落库 → 广播 → 等结果 → 返回） | ✅ **已完成，真机跑通**（`scripts/test-remote-call.mjs` 21/21：ping / get_usage_stats / read_file 真执行，失败与定向投递也正确） |
-| 5 | 端到端联调 | 进行中 |
+| 5 | 端到端联调 | 🔶 **部署完成，本地三套件在生产全绿**（OAuth 54/54、设备配对 14/14、真机转发 21/21）；剩最后一步：真实 ChatGPT 连接器 |
 
 ### Step 1 交付物（已完成）
 
@@ -343,6 +343,35 @@ ChatGPT 端看到的全部工具 = `server.ts` 的 25 个（`get_prompts` 不暴
 3. 设备不在线时如果照常投递，会白等满 5 分钟才超时 → 挑设备这一步先判 `status='online'`，立刻给模型可行动的错误信息。
 4. Worker 没有 cron，`mcp_remote_calls` 的终态行会堆积 → 每次投递前节流跑一次 `purgeRemoteCalls()`。
 
+### Step 5 进展（🔶 部署已完成，待 ChatGPT 连接器）
+
+**线上地址**：`https://remotedesktopcloud.txdygl.workers.dev`
+（Version `f38cea6a`，bundle 978.45 KiB / gzip 201.11 KiB，startup 40ms）
+
+**已完成**
+
+1. 清掉 Step 2 自测留下的 5 条 `selftest-host` 孤儿设备行与 6 条终态调用行。
+2. `wrangler secret put` × 6：`SUPABASE_URL` / `SUPABASE_PUBLISHABLE_KEY` / `SUPABASE_SERVICE_ROLE_KEY` / `AUTH_PASSWORD` / `USER_ID` / `USER_EMAIL`（`.dev.vars` 同源，未入库）。
+3. `npm run deploy` 成功，KV 绑定读的是真 namespace `46ade2b57ca8477f8b40669516398c0d`。
+4. 设备端改指生产地址重新拉起 —— **复用持久化 session，无需重新配对**（`Session restored` → `Channel subscribed` → `Presence tracked` → `online`）。
+5. 三套件对生产地址全绿：
+
+| 套件 | 命令 | 结果 |
+|---|---|---|
+| ChatGPT 侧 OAuth + MCP | `node scripts/test-oauth-flow.mjs <线上地址>` | **54/54** |
+| 设备配对流 | `node scripts/test-device-flow.mjs <线上地址>` | **14/14** |
+| 真机工具转发 | `node scripts/test-remote-call.mjs <线上地址>` | **21/21** |
+
+**踩过的坑**
+
+1. **本机直连 `workers.dev` 不通**（`curl` 20s 超时），必须走 `http://127.0.0.1:7897`。Node 的 `fetch` 默认**不读** `http_proxy`，要加 `NODE_USE_ENV_PROXY=1`（Node 24+）才能让自测脚本和设备端都走代理：
+   ```bash
+   NODE_USE_ENV_PROXY=1 https_proxy=http://127.0.0.1:7897 http_proxy=http://127.0.0.1:7897 \
+     npx @wonderwhy-er/desktop-commander@latest remote
+   ```
+   这只影响**本机**的网络环境；ChatGPT 从 OpenAI 侧访问 workers.dev 不需要代理。
+2. `wrangler secret put` 第一次执行会顺带把 Worker 注册出来（`Creating new Worker`），属于正常输出。
+
 ---
 
 ## 10. 免费额度与用量预估
@@ -364,7 +393,8 @@ Cloudflare Free：Workers 请求量充足。
    - 设备侧协议（`/mcp-info`、`/device/*`、GoTrue session、Realtime private channel + presence）**已真机验证通过**；
    - ChatGPT 侧的 **OAuth + MCP 协议面已在本地按 RFC 顺序全部验证**（`scripts/test-oauth-flow.mjs` 54/54）；
    - **Step 4 工具转发已在本地对真设备验证**（`scripts/test-remote-call.mjs` 21/21，ping / 读文件 / 统计 / 失败传播 / 定向投递）；
-   - 仍未验证：**真实 ChatGPT 连接器**（需先部署到公网，见 §12），以及线上 Workers 的长 `await`。
+   - **已部署到公网**，三套件在生产地址同样全绿（54/54 + 14/14 + 21/21），线上 `tools/call` 实测 4.4~4.9s 返回；
+   - 仍未验证：**真实 ChatGPT 连接器**（浏览器里配一次），以及线上 Workers 挂到分钟级的长 `await`。
 2. **长等待** —— `/mcp` 里 `tools/call` 会把 HTTP 响应一直挂着轮询（上限 `MAX_WAIT_MS = 240s`，见 `src/calls.ts`）。
    本地 `wrangler dev` 实测多秒级没问题；**部署到线上 Workers 后能否挂到分钟级、以及 ChatGPT 自己的 HTTP 超时是多少**，要 Step 5 真机才知道。缓解：正常调用都在 3s 内返回，只有长任务才会顶到上限。
 3. private broadcast 的 RLS 策略 —— ✅ 已配置且真机通过（设备成功 `Channel subscribed` + `Presence tracked`；Step 4 进一步验证了「服务端带用户 JWT 发广播 → 设备真的收到并执行」）。
@@ -409,17 +439,27 @@ MCP_SERVER_URL=http://localhost:8787 npx @wonderwhy-er/desktop-commander@latest 
 
 MCP 端点调试用 MCP Inspector 连 `http://localhost:8787/mcp`。
 
-部署（Step 5 用，本地开发不需要）：
+部署（✅ Step 5 已完成）：
 
 ```bash
 npx wrangler login                        # ✅ 已完成
 npx wrangler kv namespace create OAUTH_KV # ✅ 已完成，id 已填进 wrangler.jsonc
-# 生产环境变量：SUPABASE_* / AUTH_PASSWORD / USER_ID / USER_EMAIL 逐个 wrangler secret put
-npm run deploy
+npx wrangler secret put SUPABASE_URL      # ✅ 6 个 secret 全部上传
+# 其余 5 个：SUPABASE_PUBLISHABLE_KEY / SUPABASE_SERVICE_ROLE_KEY
+#            AUTH_PASSWORD / USER_ID / USER_EMAIL
+npm run deploy                            # ✅ https://remotedesktopcloud.txdygl.workers.dev
 ```
 
-> 登录与 KV 都已就绪，Step 5 只剩 `wrangler secret put` × 5 和 `npm run deploy`。
 > 全局敲 `wrangler` 会 `command not found`（只是本地 devDependency），一律用 `npx wrangler ...`。
+> 三个自测脚本都吃第二个参数当 baseUrl，所以同一套断言可以直接打生产：
+> `node scripts/test-oauth-flow.mjs https://remotedesktopcloud.txdygl.workers.dev`（要带代理，见下）。
+
+**ChatGPT 连接器配置**
+
+1. ChatGPT → 设置 → 连接器（Connectors）→ 添加自定义连接器
+2. URL 填 `https://remotedesktopcloud.txdygl.workers.dev/mcp`
+3. 授权时会跳到本服务的密码页，输入 `AUTH_PASSWORD` 即可（乙方案，见 §8）
+4. 连上后应看到 29 个 Desktop Commander 工具；先问一句「列出我的设备」，再让它读个文件验证转发
 
 ### 网络备注（本机）
 
