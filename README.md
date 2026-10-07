@@ -427,12 +427,11 @@ Cloudflare Free：Workers 请求量充足。
 3. private broadcast 的 RLS 策略 —— ✅ 已配置且真机通过（设备成功 `Channel subscribed` + `Presence tracked`；Step 4 进一步验证了「服务端带用户 JWT 发广播 → 设备真的收到并执行」）。
 4. 13MB 级 `result` 经 Workers 传递。
 5. 本机连 Supabase 直连域名偶发 DNS 解析失败（`db.<ref>.supabase.co`），`pg` 直连实测可用；失败时重试即可。
-6. **Bundle 体积** —— 涨得比预期快，**现在是头号工程约束**：
-   | 时点 | bundle | 离 1 MiB 上限 |
-   |---|---|---|
-   | Step 4 后 | `978.45 KiB` | 余 4.4% |
-   | Step 6 后（当前，`8365aba8`） | `993.10 KiB` / gzip `206.00 KiB` | **余 2.9%** |
-   Workers 免费版单次上传 1 MiB 上限，超了直接部署失败。**每加一个依赖都要先跑 `npx wrangler deploy --dry-run` 看这个数**；下一步若还要加东西，优先裁依赖（例如把 HTML/CSS/JS 内联在 `console.ts` 里，而不是引入前端构建）。
+6. **Bundle 体积** —— ✅ **已排除（先前记的"离 1 MiB 上限只剩 2.9%"是错的，作废）**。
+   - wrangler 输出的 `Total Upload: 993.10 KiB` 是**未压缩**值，`gzip: 206.00 KiB` 只是参考。原来拿未压缩的 993 KiB 去比一个"1 MiB 上限"，**那个上限不存在**。
+   - 旧规则是 **压缩后 3 MB（Free）**——我们 gzip 206 KiB 只占 6.9%，从来就不紧张。
+   - **2026-09-04 起 Cloudflare 取消了压缩后 3 MB / 10 MB 的限制，只检查未压缩 bundle，全档位 64 MiB**（[changelog](https://developers.cloudflare.com/changelog/post/2026-09-04-increased-worker-size-limit/)）。我们 0.97 MiB = 上限的 **1.5%**，还有 60 多 MiB 余量。
+   - 因此**不再需要为了 bundle 而裁依赖**（当初考虑过"砍掉 `@cloudflare/workers-oauth-provider` 换体积"，理由已不成立）。要看这个数就跑 `npx wrangler deploy --dry-run`。
 
 ---
 
