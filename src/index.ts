@@ -4,7 +4,7 @@
  * 所有请求先经 `@cloudflare/workers-oauth-provider`：
  *   - `/.well-known/*`、`POST /token`、`POST /register`、`/mcp` 的 Bearer 校验 → provider 内建
  *   - `/mcp`（拿到 token 后）→ `mcpApiHandler`，挂 MCP 服务端
- *   - 其余（`/device/*`、`/authorize`、`/api/mcp-info`）→ `defaultHandler`（下面的路由表）
+ *   - 其余（`/device/*`、`/authorize`、`/api/*`、首页控制台）→ `defaultHandler`（下面的路由表）
  */
 import { createMcpHandler } from "agents/mcp/server";
 import {
@@ -14,9 +14,16 @@ import {
   handleMcpInfo,
   page,
 } from "./device-auth.js";
+import {
+  handleConsole,
+  handleDevicesApi,
+  handleInfo,
+  handleLogin,
+  handleLogout,
+} from "./console.js";
 import type { Env } from "./env.js";
 import { requireEnv } from "./env.js";
-import { createServer, SERVER_NAME, SERVER_VERSION } from "./mcp.js";
+import { createServer } from "./mcp.js";
 import { getProvider, handleAuthorize, wrapProvider, type FetchHandler } from "./oauth.js";
 
 /** `/mcp`：provider 校验完 Bearer 之后调进来，`ctx.props` 是授权时写入的 grant props。 */
@@ -32,23 +39,18 @@ async function route(request: Request, env: Env): Promise<Response> {
   const { pathname } = new URL(request.url);
 
   if (pathname === "/api/mcp-info") return handleMcpInfo(request, env);
+  if (pathname === "/api/devices" && request.method === "GET") return handleDevicesApi(request, env);
+  if (pathname === "/api/devices/revoke" && request.method === "POST") return handleDevicesApi(request, env);
+  if (pathname === "/api/info") return handleInfo();
   if (pathname === "/device/start" && request.method === "POST") return handleDeviceStart(request, env);
   if (pathname === "/device/poll" && request.method === "POST") return handleDevicePoll(request, env);
   if (pathname === "/device/verify") return handleDeviceVerify(request, env);
   if (pathname === "/authorize") return handleAuthorize(request, env);
+  if (pathname === "/login" && request.method === "POST") return handleLogin(request, env);
+  if (pathname === "/logout" && request.method === "POST") return handleLogout(request, env);
 
-  if (pathname === "/") {
-    return Response.json(
-      {
-        name: SERVER_NAME,
-        version: SERVER_VERSION,
-        mcp: "/mcp",
-        authorize: "/authorize",
-        device: ["/api/mcp-info", "/device/start", "/device/verify", "/device/poll"],
-      },
-      { headers: { "Cache-Control": "no-store" } },
-    );
-  }
+  // 首页 = 控制台（无 session 时是密码登录页）
+  if (pathname === "/") return handleConsole(request, env);
 
   return page("未找到", `<h1>404</h1><p>没有这个路径：<code>${escapeCode(pathname)}</code></p>`, 404);
 }

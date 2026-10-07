@@ -15,7 +15,7 @@ npx @wonderwhy-er/desktop-commander remote ◀───────────�
 - 设备端认领任务、执行、写回结果，Worker 轮询返回给 ChatGPT。
 - 单用户、2-3 台设备，**免费方案**（Cloudflare Free + Supabase Free，¥0）。
 
-> 状态：架构与三项关键决策已敲定（见 §8）。**进度：Step 1 ✅ Step 2 ✅ Step 3 ✅ Step 4 ✅ 均已完成**；**Step 5 🔶 已部署到 `https://remotedesktopcloud.txdygl.workers.dev`，三套件在生产全绿（54/54 + 14/14 + 21/21）**，只剩真实 ChatGPT 连接器联调。实时进度见 §9。
+> 状态：架构与三项关键决策已敲定（见 §8）。**进度：Step 1 ✅ Step 2 ✅ Step 3 ✅ Step 4 ✅ Step 6 ✅ 均已完成**；**Step 5 🔶 已部署到 `https://remotedesktopcloud.txdygl.workers.dev`，四套件在生产全绿（34/34 + 54/54 + 14/14 + 21/21 = 123 项断言）**，只剩真实 ChatGPT 连接器联调。控制台页面见 §2「控制台」与 §9 Step 6。实时进度见 §9。
 
 ---
 
@@ -64,9 +64,18 @@ npx @wonderwhy-er/desktop-commander remote ◀───────────�
 
 > ⚠️ 关键约束：`/device/poll` 的 token 若非 GoTrue 签发，设备端 `client.auth.setSession()` 直接失败 → 设备授权流必须与 GoTrue 桥接。
 
-### 其他
+### 控制台（✅ Step 6 已实现，`scripts/test-console.mjs` 34/34 通过）
 
-- `GET /` 健康检查。
+| 端点 | 说明 |
+|---|---|
+| `GET /` | 控制台首页：无 session → 密码登录页；有 session → 设备面板（列表 / 在线状态 / 接入命令 / 连接器 URL） |
+| `POST /login` | 校验 `AUTH_PASSWORD` → 在 `OAUTH_KV` 写 `console:<token>`（7 天 TTL）→ 下 `rdc_console` cookie（HttpOnly + SameSite=Lax）→ 303 `/` |
+| `POST /logout` | 删 KV session + 清 cookie → 303 `/` |
+| `GET /api/devices` | JSON：`total` / `online` / `devices` / `html`（列表片段由服务端生成，前端只做 `innerHTML`，避免两套模板）。需 session，否则 401 |
+| `POST /api/devices/revoke` | 删 `mcp_devices` 行（`mcp_remote_calls.device_id` 是 `on delete cascade`，调用行一起消失，新调用又因外键插不进去）。需 session + JSON body（跨站 HTML 表单发不出 JSON，作为 CSRF 第二道防线） |
+| `GET /api/info` | 原来挂在 `/` 上的自描述 JSON，首页被控制台接管后挪到这里 |
+
+> 首页原先是自描述 JSON，Step 6 改为控制台；机器可读的那份留在 `GET /api/info`。
 
 ---
 
@@ -374,6 +383,24 @@ ChatGPT 端看到的全部工具 = `server.ts` 的 25 个（`get_prompts` 不暴
 
 ---
 
+### Step 6 交付物（已完成：控制台页面）
+
+用户补充需求：要一个页面能看到**有哪些设备、每台是否在线**，点「添加设备」**复制一条命令**到终端执行（配图是原版产品的 Devices 页）。
+
+1. `src/console.ts`（新增）—— 首页 `/` 从自描述 JSON 改为控制台：
+   - **设备面板**：绿点/灰点 + `Online`/`Offline` 徽标、`Last seen … · v<版本>`、每行 `Revoke`，右上角 `+ Add a device`。首屏由服务端渲染，之后每 5s 拉 `/api/devices` 覆盖列表片段。
+   - **接入命令卡**：`MCP_SERVER_URL=<当前 origin> npx @wonderwhy-er/desktop-commander@latest remote`，点按钮进剪贴板；另有一个折叠项给出**带代理的完整命令**（本机直连 `workers.dev` 不通的坑，见 Step 5）。
+   - **Where you use it**：`<origin>/mcp` 连接器 URL，一键复制。
+   - 登录页复用 `device-auth.ts` 的 `page()`；密码校验复用 `constantTimeEquals`。
+2. **Session = 乙方案密码 + KV**：`POST /login` 通过后往 `OAUTH_KV` 写 `console:<随机 token>`（TTL 7 天），下发 `rdc_console` cookie（`HttpOnly` + `SameSite=Lax`；`https` 时才加 `Secure`，本地 `http://localhost` 才设得进去）。
+   - CSRF 双保险：`SameSite=Lax` 让跨站 POST 不带 cookie；两个写接口只收 JSON body，跨站 HTML 表单发不出 JSON。
+3. `src/supabase.ts` 加 `deleteDevice()` —— 删 `mcp_devices` 行，`mcp_remote_calls.device_id` 的 `on delete cascade` 把它的调用行一并清掉，新调用又因外键插不进去 → 这台机器立刻从 ChatGPT 的可选目标里消失。
+4. 自描述 JSON 挪到 `GET /api/info`（首页被控制台接管）。
+5. `scripts/test-console.mjs`（新增，`npm run test:console`）**34/34 通过**：登录页 → 密码错/对 → cookie 属性 → 面板渲染（含 origin 的接入命令、连接器 URL、5s 轮询、Sign out）→ `/api/devices` 401/200 → revoke 的非法 id / 非 JSON body / 真删（建临时行，不碰真实设备）/ 幂等 / 真实设备未被误删 → logout 后 session 失效 → `/api/info`。
+6. **部署并四套件对生产全绿**：`34/34 + 54/54 + 14/14 + 21/21 = 123 项断言`（Version `8365aba8-351d-4659-b480-1dd620d7139d`）。自测遗留的 `console-selftest` / `selftest-host` 孤儿行已清，DB 只剩 `Mac/online`。
+
+---
+
 ## 10. 免费额度与用量预估
 
 Supabase Free：200 并发 Realtime 连接、200 万消息/月、**API 请求无限**、500MB DB、5GB egress、50000 MAU、2 个活跃项目、**1 周不活跃自动暂停**、无备份、日志保留 1 天。
@@ -400,7 +427,12 @@ Cloudflare Free：Workers 请求量充足。
 3. private broadcast 的 RLS 策略 —— ✅ 已配置且真机通过（设备成功 `Channel subscribed` + `Presence tracked`；Step 4 进一步验证了「服务端带用户 JWT 发广播 → 设备真的收到并执行」）。
 4. 13MB 级 `result` 经 Workers 传递。
 5. 本机连 Supabase 直连域名偶发 DNS 解析失败（`db.<ref>.supabase.co`），`pg` 直连实测可用；失败时重试即可。
-6. **Bundle 体积**：`wrangler deploy --dry-run` 实测 `978.45 KiB / gzip 201.11 KiB`，离 Workers 免费版 1 MiB 上限只剩约 4.4%（Step 4 加了 `calls.ts`，涨了 7.5 KiB）。以后每加依赖都要看一眼这个数。
+6. **Bundle 体积** —— 涨得比预期快，**现在是头号工程约束**：
+   | 时点 | bundle | 离 1 MiB 上限 |
+   |---|---|---|
+   | Step 4 后 | `978.45 KiB` | 余 4.4% |
+   | Step 6 后（当前，`8365aba8`） | `993.10 KiB` / gzip `206.00 KiB` | **余 2.9%** |
+   Workers 免费版单次上传 1 MiB 上限，超了直接部署失败。**每加一个依赖都要先跑 `npx wrangler deploy --dry-run` 看这个数**；下一步若还要加东西，优先裁依赖（例如把 HTML/CSS/JS 内联在 `console.ts` 里，而不是引入前端构建）。
 
 ---
 
@@ -416,15 +448,18 @@ npm run dev               # wrangler dev → http://localhost:8787（读 .dev.va
 
 > 迁移执行器用 Node `pg` 直连 `DATABASE_URL`（本机无 brew/psql，故不依赖 psql）。
 
-Step 2 / 3 / 4 自测（需先 `npm run dev`）：
+Step 2 / 3 / 4 / 6 自测（需先 `npm run dev`）：
 
 ```bash
 node scripts/test-device-flow.mjs   # 14 项断言，覆盖设备配对全流程
 node scripts/test-oauth-flow.mjs    # 54 项断言，覆盖 ChatGPT 侧 OAuth + MCP 全流程
 npm run test:call                   # 21 项断言，Step 4 真机转发（需设备在线）
+npm run test:console                # 34 项断言，Step 6 控制台页面 + 两个 API
 npm run tools:capture               # 重抓设备端工具定义 → tools.captured.json
 node scripts/probe-broadcast.mjs real-jwt   # 探针：证明门铃真的送达（real-apikey 会证明「202 ≠ 送达」）
 ```
+
+> 四个套件都能直接对线上地址跑：`node scripts/test-xxx.mjs https://remotedesktopcloud.txdygl.workers.dev`（本机需带 `NODE_USE_ENV_PROXY=1` + 两个 proxy 变量，见 §12 网络备注）。
 
 > `test-oauth-flow.mjs` 走的是 ChatGPT 的真实顺序：`POST /mcp` 401 拿 `resource_metadata` → RFC 9728/8414 discovery
 > → RFC 7591 DCR → `GET/POST /authorize` 密码页 → `/token` 换 code → `initialize` → `tools/list`(=29) → `tools/call`。

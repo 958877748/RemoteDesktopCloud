@@ -90,12 +90,25 @@ export async function createDevice(
   return rows[0].id;
 }
 
-/** 当前用户的全部设备（list_devices 工具用）。 */
+/** 当前用户的全部设备（list_devices 工具用 / 控制台页面用）。 */
 export async function listDevices(env: Env): Promise<any[]> {
   return (await rest(
     env,
     `mcp_devices?user_id=eq.${encodeURIComponent(env.USER_ID)}&select=id,device_name,status,last_seen,capabilities&order=last_seen.desc`,
   )) as any[];
+}
+
+/**
+ * 吊销一台设备：删掉 `mcp_devices` 行。
+ * `mcp_remote_calls.device_id` 是 `on delete cascade`，它的调用行一起消失，
+ * 而新调用又插不进去（外键）→ 这台机器立刻从 ChatGPT 的可选目标里消失。
+ */
+export async function deleteDevice(env: Env, deviceId: string): Promise<void> {
+  await rest(
+    env,
+    `mcp_devices?id=eq.${encodeURIComponent(deviceId)}&user_id=eq.${encodeURIComponent(env.USER_ID)}`,
+    { method: "DELETE" },
+  );
 }
 
 // ---------------------------------------------------------------------------

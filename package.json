@@ -12,6 +12,7 @@
     "test:device": "node scripts/test-device-flow.mjs",
     "test:oauth": "node scripts/test-oauth-flow.mjs",
     "test:call": "node scripts/test-remote-call.mjs",
+    "test:console": "node scripts/test-console.mjs",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
