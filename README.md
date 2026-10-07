@@ -15,7 +15,7 @@ npx @wonderwhy-er/desktop-commander remote ◀───────────�
 - 设备端认领任务、执行、写回结果，Worker 轮询返回给 ChatGPT。
 - 单用户、2-3 台设备，**免费方案**（Cloudflare Free + Supabase Free，¥0）。
 
-> 状态：架构与三项关键决策已敲定（见 §8）。**进度：Step 1 ✅ Step 2 ✅ Step 3 ✅ Step 4 ✅ Step 6 ✅ 均已完成**；**Step 5 🔶 已部署到 `https://remotedesktopcloud.txdygl.workers.dev`，四套件在生产全绿（34/34 + 54/54 + 14/14 + 21/21 = 123 项断言）**，只剩真实 ChatGPT 连接器联调。控制台页面见 §2「控制台」与 §9 Step 6。实时进度见 §9。
+> 状态：**MVP 六步全部完成 ✅**。真实 ChatGPT 连接器已跑通——ChatGPT 自动发现并使用了本服务发布的 OAuth 端点与作用域，`list_devices` / `start_process` 均真机往返成功；四套件 **128 项断言**全绿（控制台 34 + OAuth 54 + 设备配对 14 + 真机转发 26）。线上地址 `https://remotedesktopcloud.txdygl.workers.dev`。关键决策见 §8，进度见 §9，已知限制（Workers Free 子请求预算、设备写回假阴性）见 §11。
 
 ---
 
@@ -184,7 +184,7 @@ ChatGPT ─▶ POST /mcp (tools/call)
 Worker  ─▶ 选一台在线设备（listDevices，按 last_seen 倒序）
 Worker  ─▶ INSERT mcp_remote_calls (status=pending, timeout_at=+5min)
 Worker  ─▶ POST realtime/v1/api/broadcast  event=new_call {call_id, device_id}
-Worker  ─▶ 轮询该行（500ms 一次，等到终态或 240s 上限）
+Worker  ─▶ 轮询该行（自适应退避 500ms→1s→5s，34 轮子请求预算 ≈ 2 分钟，见 §11 第 2 条）
 设备    ─▶ 条件 UPDATE 认领 → executing → 本地执行 → 写回 completed/failed
 Worker  ─▶ 返回 result（或 isError + 原因）给 ChatGPT
 ```
@@ -278,8 +278,9 @@ ChatGPT 端看到的全部工具 = `server.ts` 的 25 个（`get_prompts` 不暴
 | 1 | schema + RLS + 清扫（sweep） | ✅ **已完成**（`0001_init.sql` + `0002_device_codes.sql` 已应用并反查验证） |
 | 2 | **设备授权流**（`/api/mcp-info` + `/device/start\|verify\|poll` + GoTrue 桥接）→ 先让设备连上 | ✅ **已完成，真机跑通**（官方 npm 包 → 本地 Worker → Supabase，`Channel subscribed` + `Presence tracked` + `online`） |
 | 3 | `/mcp` + OAuth（RFC 8414/9728/7591、PKCE、29 工具静态注册）→ 再让 ChatGPT 能调 | ✅ **已完成**（本地全链路 54/54 通过：401→discovery→DCR→authorize→token→initialize→`tools/list`=29） |
-| 4 | 核心链路（落库 → 广播 → 等结果 → 返回） | ✅ **已完成，真机跑通**（`scripts/test-remote-call.mjs` 21/21：ping / get_usage_stats / read_file 真执行，失败与定向投递也正确） |
-| 5 | 端到端联调 | 🔶 **部署完成，本地三套件在生产全绿**（OAuth 54/54、设备配对 14/14、真机转发 21/21）；剩最后一步：真实 ChatGPT 连接器 |
+| 4 | 核心链路（落库 → 广播 → 等结果 → 返回） | ✅ **已完成，真机跑通**（`scripts/test-remote-call.mjs` **26/26**：ping / get_usage_stats / read_file 真执行，失败与定向投递正确，另有 34.6s 长任务回归） |
+| 5 | 端到端联调 | ✅ **已完成，真实 ChatGPT 连接器跑通**（discovery 端点与作用域均为本服务发布的、`list_devices` 直答、`start_process` 真机穿越；四套件 **128 项断言**全绿） |
+| 6 | 控制台页面（设备列表 / 在线状态 / 一键复制接入命令） | ✅ **已完成**（`src/console.ts`，`scripts/test-console.mjs` **34/34**，已部署） |
 
 ### Step 1 交付物（已完成）
 
@@ -330,7 +331,7 @@ ChatGPT 端看到的全部工具 = `server.ts` 的 25 个（`get_prompts` 不暴
 - `src/calls.ts` — 核心链路：挑设备 → `INSERT mcp_remote_calls` → 广播 `new_call` → 500ms 轮询到终态 → 还原 `CallToolResult`。含 NUL 清洗（jsonb/text 都存不了 U+0000）、GoTrue session 复用、清扫节流。
 - `src/supabase.ts` — 新增 `insertRemoteCall`（`Prefer: return=representation` 拿 DB 时钟的 `timeout_at`）/ `getRemoteCall` / `purgeRemoteCalls`
 - `src/mcp.ts` — `Result` 类型换成真正的 `CallToolResult`；`tools/call` 取出 `_meta`，27 个工具全部转交 `dispatchCall`
-- `scripts/test-remote-call.mjs` — 端到端 21 项断言（**21/21 通过**）
+- `scripts/test-remote-call.mjs` — 端到端 **26 项断言**（**26/26 通过**；原 21 项，Step 5 追加第 8 节 34.6s 长任务的子请求预算回归）
 - `scripts/probe-broadcast.mjs` — 广播送达探针（`real-apikey` / `real-jwt` 两档对照，用来证明「202 ≠ 送达」）
 - `scripts/test-oauth-flow.mjs` — 第 10 节由「占位」断言改为「真转发」断言，**54/54 通过**；`test-device-flow` 14/14 回归也全绿
 - `package.json` — 新增 `npm run test:call`
@@ -352,10 +353,10 @@ ChatGPT 端看到的全部工具 = `server.ts` 的 25 个（`get_prompts` 不暴
 3. 设备不在线时如果照常投递，会白等满 5 分钟才超时 → 挑设备这一步先判 `status='online'`，立刻给模型可行动的错误信息。
 4. Worker 没有 cron，`mcp_remote_calls` 的终态行会堆积 → 每次投递前节流跑一次 `purgeRemoteCalls()`。
 
-### Step 5 进展（🔶 部署已完成，待 ChatGPT 连接器）
+### Step 5 交付物（✅ 已完成：真实 ChatGPT 连接器跑通）
 
 **线上地址**：`https://remotedesktopcloud.txdygl.workers.dev`
-（Version `f38cea6a`，bundle 978.45 KiB / gzip 201.11 KiB，startup 40ms）
+（最新 Version `145638bf`，bundle 994.96 KiB / gzip 206.50 KiB）
 
 **已完成**
 
@@ -363,13 +364,25 @@ ChatGPT 端看到的全部工具 = `server.ts` 的 25 个（`get_prompts` 不暴
 2. `wrangler secret put` × 6：`SUPABASE_URL` / `SUPABASE_PUBLISHABLE_KEY` / `SUPABASE_SERVICE_ROLE_KEY` / `AUTH_PASSWORD` / `USER_ID` / `USER_EMAIL`（`.dev.vars` 同源，未入库）。
 3. `npm run deploy` 成功，KV 绑定读的是真 namespace `46ade2b57ca8477f8b40669516398c0d`。
 4. 设备端改指生产地址重新拉起 —— **复用持久化 session，无需重新配对**（`Session restored` → `Channel subscribed` → `Presence tracked` → `online`）。
-5. 三套件对生产地址全绿：
+5. 四套件全绿（**128 项断言**；建议直接对 `http://localhost:8787` 跑，见坑 3）：
 
 | 套件 | 命令 | 结果 |
 |---|---|---|
-| ChatGPT 侧 OAuth + MCP | `node scripts/test-oauth-flow.mjs <线上地址>` | **54/54** |
-| 设备配对流 | `node scripts/test-device-flow.mjs <线上地址>` | **14/14** |
-| 真机工具转发 | `node scripts/test-remote-call.mjs <线上地址>` | **21/21** |
+| 控制台页面 | `node scripts/test-console.mjs <地址>` | **34/34** |
+| ChatGPT 侧 OAuth + MCP | `node scripts/test-oauth-flow.mjs <地址>` | **54/54** |
+| 设备配对流 | `node scripts/test-device-flow.mjs <地址>` | **14/14** |
+| 真机工具转发（含长任务） | `node scripts/test-remote-call.mjs <地址>` | **26/26** |
+
+6. **真实 ChatGPT 连接器**（Step 5 的最后一环，也是 §11 第 1 条原判的"最大风险"）：
+   - 连接器对话框选 `OAuth`，「OAuth 高级设置」自动发现出的 Auth / 令牌 / 注册 URL **就是我们发布的** `/authorize`、`/token`、`/register`，授权服务器基础与资源都是本 Worker origin；
+   - 默认作用域列出 **`mcp:tools` / `desktop:auth`** —— 这两个值只存在于我们 AS metadata 的 `scopes_supported` 里，不可能是 ChatGPT 的默认值，**证明 RFC 9728 → 8414 discovery 真读了我们的 JSON**；
+   - 注册方法自动落到 **DCR**；`CIMD 不可用`、`OIDC 未启用` 两条警告都是回退到我们没实现的分支，无影响；
+   - 授权后 `list_devices` 云端直答 `Mac / online / v0.2.52`；`start_process` 真机穿越成功（DB `metadata` 里带 `openai/session`、`openai/userAgent`、`openai/userLocation` 及坐标）。
+
+**真机发现并修掉的两个问题**（详见 §11 第 2、7 条）
+
+1. **设备写回的假阴性** —— ChatGPT 那次 ping 在 DB 里是 `status=failed`，但 `result` 躺着完整的 ping 输出。设备端「UPDATE 已提交、HTTP 响应丢失」时误判失败并补写 `failed`。`calls.ts` 现在以「`failed` 且有 `result`」→ 以 result 为准。
+2. **子请求预算** —— Workers Free 单次请求 50 个子请求，固定 500ms 轮询约 40 轮就撞 `Too many subrequests`（真机复现：一次 `read_file` 拖到 39s 翻车）。改成自适应退避 + 34 轮预算，34.6s 长任务回归通过。
 
 **踩过的坑**
 
@@ -380,6 +393,7 @@ ChatGPT 端看到的全部工具 = `server.ts` 的 25 个（`get_prompts` 不暴
    ```
    这只影响**本机**的网络环境；ChatGPT 从 OpenAI 侧访问 workers.dev 不需要代理。
 2. `wrangler secret put` 第一次执行会顺带把 Worker 注册出来（`Creating new Worker`），属于正常输出。
+3. **本机代理在突发请求下会断连** —— 自测脚本偶发 `TypeError: terminated` / `SocketError: other side closed`，这是**测试客户端**的问题，不是服务端。两条出路：重跑，或者直接对 `http://localhost:8787` 跑（本地 dev 不经代理，而设备连的是**同一个 Supabase**，转发/广播照样通，四套件本地全绿已验证）。
 
 ---
 
@@ -416,22 +430,33 @@ Cloudflare Free：Workers 请求量充足。
 
 ## 11. 已知技术风险
 
-1. **端到端联调** —— 协议兼容性只能真机暴露（最大风险）。
-   - 设备侧协议（`/mcp-info`、`/device/*`、GoTrue session、Realtime private channel + presence）**已真机验证通过**；
-   - ChatGPT 侧的 **OAuth + MCP 协议面已在本地按 RFC 顺序全部验证**（`scripts/test-oauth-flow.mjs` 54/54）；
-   - **Step 4 工具转发已在本地对真设备验证**（`scripts/test-remote-call.mjs` 21/21，ping / 读文件 / 统计 / 失败传播 / 定向投递）；
-   - **已部署到公网**，三套件在生产地址同样全绿（54/54 + 14/14 + 21/21），线上 `tools/call` 实测 4.4~4.9s 返回；
-   - 仍未验证：**真实 ChatGPT 连接器**（浏览器里配一次），以及线上 Workers 挂到分钟级的长 `await`。
-2. **长等待** —— `/mcp` 里 `tools/call` 会把 HTTP 响应一直挂着轮询（上限 `MAX_WAIT_MS = 240s`，见 `src/calls.ts`）。
-   本地 `wrangler dev` 实测多秒级没问题；**部署到线上 Workers 后能否挂到分钟级、以及 ChatGPT 自己的 HTTP 超时是多少**，要 Step 5 真机才知道。缓解：正常调用都在 3s 内返回，只有长任务才会顶到上限。
+1. **端到端联调** —— ✅ **已清除（Step 5 真机通过）**。
+   - 设备侧协议（`/mcp-info`、`/device/*`、GoTrue session、Realtime private channel + presence）已真机验证；
+   - **真实 ChatGPT 连接器已跑通**，三条硬证据：
+     1. ChatGPT 的「OAuth 高级设置」里列出的端点**就是我们发布的** `/authorize` / `/token` / `/register`，授权服务器基础与资源都是本 Worker origin；
+     2. 它列出的默认作用域是 **`mcp:tools` / `desktop:auth`** —— 这两个值只存在于我们 AS metadata 的 `scopes_supported` 里，不是 ChatGPT 的默认值，说明 RFC 9728 → 8414 的 discovery 真读了我们的 JSON；
+     3. 注册方法自动落到 **DCR**（`CIMD 不可用` 的警告只是回退到我们唯一实现的路径；`OIDC 未启用` 同理，我们没发布 openid-configuration，ChatGPT 只用它取 email，grant props 里已带）。
+   - 授权后：`list_devices` 云端直答 `Mac / online / v0.2.52`；`start_process` 真机穿越成功（metadata 里带 `openai/session`、`openai/userAgent`、`openai/userLocation`）。
+   - 四套件全绿 **34/34 + 54/54 + 14/14 + 26/26 = 128 项断言**。
+   - 仍未覆盖：ChatGPT 侧的手动 OAuth 端点输入（我们走自动发现即可）。
+2. **长等待 / 子请求预算** —— ✅ **真机撞过墙，已定位并修复**。
+   - **Cloudflare Workers Free：子请求 50 次/请求**（`fetch()` 和 KV/R2/D1 都算，[limits 页](https://developers.cloudflare.com/workers/platform/limits/)）。注意 **HTTP 请求本身没有时长上限**（客户端连着就能一直做子请求），CPU 才是 10ms/请求。
+   - 原来固定 500ms 一轮 → 理论 240s 要 480 次，**实际约 40~45 轮就撞墙**。真机复现：一次 `read_file` 因设备侧偶发变慢拖到 39s，返回 `Too many subrequests by single Worker invocation`。
+   - 修法：**自适应退避 + 轮询预算**（`POLL_BUDGET = 34`，`src/calls.ts`）——头 3s 按 500ms、3~12s 按 1s、之后 5s 一次。真机每轮约 0.8s（500ms 睡眠 + REST 往返），34 轮覆盖**约 2 分钟**；撞预算时抛 `PollBudgetExhausted`，给 ChatGPT 返回人话而不是 Cloudflare 的原始错误。
+   - **回归用例**：`test-remote-call` 第 8 节 —— `start_process` 卡 **34.6s** 的单次调用必须成功（老代码要 ~70 次轮询，必然失败）。
+   - 剩余限制：单次调用最长等**约 2 分钟**，不是 240s。要更长只能升 Paid（子请求 10,000）。
 3. private broadcast 的 RLS 策略 —— ✅ 已配置且真机通过（设备成功 `Channel subscribed` + `Presence tracked`；Step 4 进一步验证了「服务端带用户 JWT 发广播 → 设备真的收到并执行」）。
 4. 13MB 级 `result` 经 Workers 传递。
 5. 本机连 Supabase 直连域名偶发 DNS 解析失败（`db.<ref>.supabase.co`），`pg` 直连实测可用；失败时重试即可。
 6. **Bundle 体积** —— ✅ **已排除（先前记的"离 1 MiB 上限只剩 2.9%"是错的，作废）**。
-   - wrangler 输出的 `Total Upload: 993.10 KiB` 是**未压缩**值，`gzip: 206.00 KiB` 只是参考。原来拿未压缩的 993 KiB 去比一个"1 MiB 上限"，**那个上限不存在**。
+   - wrangler 输出的 `Total Upload: 994.96 KiB` 是**未压缩**值，`gzip: 206.50 KiB` 只是参考。原来拿未压缩的 993 KiB 去比一个"1 MiB 上限"，**那个上限不存在**。
    - 旧规则是 **压缩后 3 MB（Free）**——我们 gzip 206 KiB 只占 6.9%，从来就不紧张。
-   - **2026-09-04 起 Cloudflare 取消了压缩后 3 MB / 10 MB 的限制，只检查未压缩 bundle，全档位 64 MiB**（[changelog](https://developers.cloudflare.com/changelog/post/2026-09-04-increased-worker-size-limit/)）。我们 0.97 MiB = 上限的 **1.5%**，还有 60 多 MiB 余量。
+   - **2026-09-04 起 Cloudflare 取消了压缩后 3 MB / 10 MB 的限制，只检查未压缩 bundle，全档位 64 MiB**（[changelog](https://developers.cloudflare.com/changelog/post/2026-09-04-increased-worker-size-limit/)）。我们 0.99 MiB = 上限的 **1.5%**，还有 60 多 MiB 余量。
    - 因此**不再需要为了 bundle 而裁依赖**（当初考虑过"砍掉 `@cloudflare/workers-oauth-provider` 换体积"，理由已不成立）。要看这个数就跑 `npx wrangler deploy --dry-run`。
+7. **设备侧写回的假阴性** —— 已在 Worker 侧兜住，但 DB 会留下「`status=failed` 却有 `result`」的行。
+   - 设备端 `remote-channel.ts` 的 fail-fast 兜底：结果写入的 UPDATE **已提交**、HTTP 响应却在半路丢了（实测 `TypeError: fetch failed`，设备经本地代理连 Supabase 时出现），客户端误判成写入失败，再补一发把 `status` 改成 `failed`（**不清 `result`**）。
+   - 真机复现过一次（ChatGPT 那次 ping，结果其实正常返回给了 ChatGPT）。对照真正在跑的 npm 包 `dist/` 确认：真执行失败写的是 `('failed', null, error)`，所以**「failed 且有 result」只可能是这个假阴性** → `calls.ts` 以 `result` 为准。
+   - 可选的彻底修法在设备侧（写回失败先回读一次再决定），但设备端是 npm 包，不在本仓库约束内。
 
 ---
 
@@ -452,13 +477,13 @@ Step 2 / 3 / 4 / 6 自测（需先 `npm run dev`）：
 ```bash
 node scripts/test-device-flow.mjs   # 14 项断言，覆盖设备配对全流程
 node scripts/test-oauth-flow.mjs    # 54 项断言，覆盖 ChatGPT 侧 OAuth + MCP 全流程
-npm run test:call                   # 21 项断言，Step 4 真机转发（需设备在线）
+npm run test:call                   # 26 项断言，真机转发（需设备在线；第 8 节是 ~35s 长任务）
 npm run test:console                # 34 项断言，Step 6 控制台页面 + 两个 API
 npm run tools:capture               # 重抓设备端工具定义 → tools.captured.json
 node scripts/probe-broadcast.mjs real-jwt   # 探针：证明门铃真的送达（real-apikey 会证明「202 ≠ 送达」）
 ```
 
-> 四个套件都能直接对线上地址跑：`node scripts/test-xxx.mjs https://remotedesktopcloud.txdygl.workers.dev`（本机需带 `NODE_USE_ENV_PROXY=1` + 两个 proxy 变量，见 §12 网络备注）。
+> **四个套件合计 128 项断言。建议对 `http://localhost:8787` 跑**：本地 dev 不经代理，而设备连的是同一个 Supabase，转发与广播照样通（已验证）。对线上跑则必须带 `NODE_USE_ENV_PROXY=1` + 两个 proxy 变量，且本机代理在突发请求下会断连、脚本偶发 `TypeError: terminated` —— 那是客户端问题，重跑即可。
 
 > `test-oauth-flow.mjs` 走的是 ChatGPT 的真实顺序：`POST /mcp` 401 拿 `resource_metadata` → RFC 9728/8414 discovery
 > → RFC 7591 DCR → `GET/POST /authorize` 密码页 → `/token` 换 code → `initialize` → `tools/list`(=29) → `tools/call`。

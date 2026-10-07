@@ -126,7 +126,7 @@ section(2, "设备在线");
 const listRes = await callTool("list_devices");
 const devices = JSON.parse(textOf(listRes) || "{}").devices ?? [];
 const online = devices.filter((d) => d.status === "online");
-console.log(`    设备：${devices.map((d) => `${d.name}=${d.status}`).join(", ") || "（无）"}`);
+console.log(`    设备：${devices.map((d) => `${d.device_name}=${d.status}`).join(", ") || "（无）"}`);
 check(`至少一台 online（实际 ${online.length}）`, online.length > 0, "先启动设备进程");
 if (!online.length) {
   console.log("\n没有在线设备，后续用例无法验证。启动设备后重跑。");
@@ -178,6 +178,32 @@ check(`不等超时 (${routed.ms}ms < 5000ms)`, routed.ms < 5_000, `${routed.ms}
 
 const routedOk = await callTool("ping", {}, { device_id: target.id });
 check(`正确的设备_id 能跑通`, /pong/.test(textOf(routedOk)), textOf(routedOk).slice(0, 300));
+
+// --- 8. 长任务（子请求预算回归）----------------------------------------------
+// Workers Free 单次请求只有 **50 个子请求**（官方 limits 页，KV 读写也算）。
+// 固定 500ms 轮询时约 20~40s 就撞墙，报
+// `Too many subrequests by single Worker invocation`（真机复现过：一次 read_file
+// 因设备侧偶发变慢拖到 39s 直接翻车）。
+//
+// 用 start_process 卡住：它会**阻塞等初始输出**，`sleep 30 && echo ...` 让这一次
+// 调用真实地挂 30s+ —— 自适应退避下约 18 次轮询就能扛过去，老代码要 ~70 次。
+// 标记用 `echo MAR""KER_OK_7f3a`：回显的输入行里没有连起来的字面量，只有 sleep
+// 之后真正打印出来的输出才有 —— 防假阳性。
+section(8, "长任务：设备端挂 30s（子请求预算回归）");
+
+const slow = await callTool("start_process", {
+  command: 'sleep 30 && echo MAR""KER_OK_7f3a',
+  timeout_ms: 120_000,
+});
+check(`200 (实际 ${slow.status})`, slow.status === 200, slow.raw.slice(0, 300));
+check(`扛过子请求预算（${slow.ms}ms ≥ 25000）`, slow.ms >= 25_000, `${slow.ms}ms`);
+check(
+  `不是 Too many subrequests`,
+  !/Too many subrequests/i.test(textOf(slow)) && slow.body?.result?.isError !== true,
+  textOf(slow).slice(0, 300),
+);
+check(`拿到延迟输出（非回显）`, /MARKER_OK_7f3a/.test(textOf(slow)), textOf(slow).slice(0, 300));
+check(`拿到 pid`, /PID \d+/.test(textOf(slow)), textOf(slow).slice(0, 300));
 
 // --- 汇总 ---------------------------------------------------------------------
 console.log(`\n通过 ${pass} / 失败 ${fail}`);

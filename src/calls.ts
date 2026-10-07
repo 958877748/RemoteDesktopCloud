@@ -24,9 +24,8 @@ import {
   purgeRemoteCalls,
 } from "./supabase.js";
 
-/** 等待上限：DB 的 `timeout_at` 是 +5min，这里留 60s 余量。 */
+/** 等待上限：DB 的 `timeout_at` 是 +5min，这里留 60s 余量。实际更早受轮询预算限制。 */
 const MAX_WAIT_MS = 240_000;
-const POLL_INTERVAL_MS = 500;
 /** 连续轮询失败几次才认为 REST 挂了（偶发抖动不该让调用失败）。 */
 const POLL_ERROR_STRIKES = 5;
 /** 清扫节流：同一 isolate 内最多每 10 分钟跑一次。 */
@@ -139,9 +138,45 @@ async function broadcastNewCall(env: Env, callId: string, deviceId: string): Pro
   }
 }
 
-/** 轮询到终态；返回 null 表示等到超时（或行被清扫）。 */
+/**
+ * 轮询到终态；返回 null 表示等到超时（或行被清扫）。
+ * 抛 `PollBudgetExhausted` 表示子请求预算用尽（见下）。
+ *
+ * **子请求预算是硬约束**：Workers Free 单次请求只给 **50 个子请求**（官方 limits 页，
+ * KV 读写也算），而每次 `getRemoteCall` 就是一次 fetch，基础开销
+ * （OAuth 的 KV 校验 / listDevices / insert / 广播 / GoTrue）还要占掉几个。
+ * 原来固定 500ms 一轮 → 理论上 240s 要 480 次，**实际约 40~45 轮就撞墙**，
+ * 报 `Too many subrequests by single Worker invocation`（真机复现过一次，
+ * 一次 `read_file` 因设备侧偶发变慢拖到 39s 直接翻车）。
+ *
+ * 改法：**自适应退避 + 轮询预算**。头 3s 密集（快调用不掉延迟）、3~12s 放到 1s、
+ * 之后 5s 一轮。34 轮预算在真机实测的每轮 ~0.8s（500ms 睡眠 + REST 往返）下
+ * 能覆盖 **约 2 分钟**，而 HTTP 请求本身没有时长上限（官方 limits 页：只要客户端
+ * 还连着，Worker 可以一直做子请求）。
+ */
+const POLL_BUDGET = 34;
+const POLL_FAST_MS = 500;
+const POLL_MED_MS = 1_000;
+const POLL_SLOW_MS = 5_000;
+const FAST_WINDOW_MS = 3_000;
+const MED_WINDOW_MS = 12_000;
+
+class PollBudgetExhausted extends Error {
+  constructor(public readonly polls: number) {
+    super(`subrequest budget exhausted after ${polls} polls`);
+  }
+}
+
+function pollIntervalMs(elapsedMs: number): number {
+  if (elapsedMs < FAST_WINDOW_MS) return POLL_FAST_MS;
+  if (elapsedMs < MED_WINDOW_MS) return POLL_MED_MS;
+  return POLL_SLOW_MS;
+}
+
 async function waitForResult(env: Env, callId: string, deadline: number): Promise<any | null> {
   let strikes = 0;
+  let polls = 0;
+  const startedAt = Date.now();
   for (;;) {
     let row: any | null = null;
     let readFailed = false;
@@ -152,6 +187,7 @@ async function waitForResult(env: Env, callId: string, deadline: number): Promis
       if (++strikes >= POLL_ERROR_STRIKES) throw err;
       readFailed = true;
     }
+    polls++; // 无论成败，这次 fetch 都消耗了一个子请求
     if (!readFailed) {
       if (!row) return null; // 被清扫了
       if (row.status === "completed" || row.status === "failed") return row;
@@ -159,7 +195,8 @@ async function waitForResult(env: Env, callId: string, deadline: number): Promis
     }
     const left = deadline - Date.now();
     if (left <= 0) return null;
-    await sleep(Math.min(POLL_INTERVAL_MS, left));
+    if (polls >= POLL_BUDGET) throw new PollBudgetExhausted(polls);
+    await sleep(Math.min(pollIntervalMs(Date.now() - startedAt), left));
   }
 }
 
@@ -224,6 +261,19 @@ export async function dispatchCall(env: Env, opts: DispatchOptions): Promise<Cal
   try {
     done = await waitForResult(env, callId, deadline);
   } catch (err) {
+    if (err instanceof PollBudgetExhausted) {
+      return error(
+        `${opts.toolName}：已投递给设备 ${device.device_name}，但等待预算用尽（${err.polls} 次轮询）。` +
+          "Cloudflare Workers 免费版单次请求只允许 50 个子请求，这是硬上限。" +
+          "调用可能仍在设备上执行，结果会照常写入 mcp_remote_calls，稍后可在控制台/DB 查到。",
+      );
+    }
+    if (/Too many subrequests/i.test(reason(err))) {
+      return error(
+        `${opts.toolName}：子请求配额被打满（${reason(err)}）。` +
+          `调用已投递给设备 ${device.device_name}，可能仍在执行，结果会照常写入 mcp_remote_calls。`,
+      );
+    }
     return error(`${opts.toolName}：轮询执行结果失败（${reason(err)}）。调用已投递给设备 ${device.device_name}，可能仍在执行。`);
   }
 
@@ -236,7 +286,24 @@ export async function dispatchCall(env: Env, opts: DispatchOptions): Promise<Cal
     );
   }
   if (done.status === "failed") {
+    // 假阴性：设备端 remote-channel.ts 的 fail-fast 兜底，在「结果写入的 UPDATE
+    // 已提交、但 HTTP 响应在半路丢失」时会误判成写入失败（实测
+    // `TypeError: fetch failed`，设备经本地代理连 Supabase 时出现过），
+    // 再补一发把 status 改写成 `failed` —— 而 `result` 其实安然在库里。
+    // 兜底那一发传的是 `result: null`，且 `if (result !== null)` 不会清掉旧值，
+    // 所以这个组合在正确执行下不可能出现。
+    //
+    // 对照真正在跑的 npm 包 `@wonderwhy-er/desktop-commander` 的 dist：
+    //   成功       → updateCallResult(id, 'completed', result)
+    //   真执行失败 → updateCallResult(id, 'failed', null, error.message)
+    // 即「failed 且有 result」**只**可能是这个假阴性 → 以 result 为准。
+    if (hasResult(done.result)) return toResult(done.result);
     return error(`${opts.toolName} 在设备 ${device.device_name} 上执行失败：${done.error_message ?? "未知错误"}`);
   }
   return toResult(done.result);
+}
+
+/** jsonb 里可能是 JSON `""` —— 那不算有结果。 */
+function hasResult(value: unknown): boolean {
+  return value !== null && value !== undefined && value !== "";
 }
