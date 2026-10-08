@@ -498,7 +498,31 @@ MCP_SERVER_URL=http://localhost:8787 npx @wonderwhy-er/desktop-commander@latest 
 
 MCP 端点调试用 MCP Inspector 连 `http://localhost:8787/mcp`。
 
-部署（✅ Step 5 已完成）：
+**部署：推 `main` 即自动上线（Cloudflare Workers Builds）**
+
+仓库已通过 Cloudflare 的 **Workers Builds** 连到 Worker `remotedesktopcloud`
+（Worker → 设置 → 构建 → Git 存储库）。推 commit 到 `main` 就会构建并部署，**不用建 API token、不用 GitHub Secrets**。
+
+| 项 | 值 |
+|---|---|
+| Git 存储库 | `958877748/RemoteDesktopCloud`，生产分支 `main` |
+| 构建命令 | `npm run typecheck` ← **类型检查不过就不部署**，相当于 verify 门 |
+| 部署命令 | `npx wrangler deploy`（默认，wrangler 版本取自 `package.json`） |
+| 根目录 | `/` |
+| 预览构建 | **已关闭**（只用 `main`；预览环境没有 KV 绑定和运行时 secrets，开着只会在推分支时白跑一个红叉） |
+| API 令牌 | Cloudflare 自动生成（`Workers Scripts: Edit` + `Workers KV Storage: Edit` + `User Details: Read`） |
+
+> 构建历史：Worker → **部署** → `View build history`。一次约 1~2 分钟；
+> 免费额度 **3,000 build 分钟/月**（1 并发、20 分钟超时、2 vCPU / 8 GB）。
+> 依赖按 `package-lock.json` 自动安装。
+>
+> 选 Build command 是 `npm run typecheck` 而不是 `wrangler deploy --dry-run`：typecheck 已经能挡住
+> 唯一会让部署出错的那类改动，dry-run 只是重复打包，deploy 自己会验 bundle。
+>
+> 曾写过 `.github/workflows/deploy.yml` 走 GitHub Actions（verify job + deploy job），因 Workers Builds
+> **不需要手动建 Cloudflare API token**、且部署历史直接挂在 Worker 上，**已弃用并删除**。
+
+上线时的一次性步骤（已完成，不用重做）：
 
 ```bash
 npx wrangler login                        # ✅ 已完成
@@ -506,8 +530,12 @@ npx wrangler kv namespace create OAUTH_KV # ✅ 已完成，id 已填进 wrangle
 npx wrangler secret put SUPABASE_URL      # ✅ 6 个 secret 全部上传
 # 其余 5 个：SUPABASE_PUBLISHABLE_KEY / SUPABASE_SERVICE_ROLE_KEY
 #            AUTH_PASSWORD / USER_ID / USER_EMAIL
-npm run deploy                            # ✅ https://remotedesktopcloud.txdygl.workers.dev
+npm run deploy                            # 本地手动发版（等同，但会绕过 typecheck 门）
+# → https://remotedesktopcloud.txdygl.workers.dev
 ```
+
+> **6 个运行时 secret 存在 Cloudflare 侧**，`wrangler deploy` 不会覆盖或删除它们 ——
+> 所以自动部署不需要在任何 CI 里传密钥。
 
 > 全局敲 `wrangler` 会 `command not found`（只是本地 devDependency），一律用 `npx wrangler ...`。
 > 三个自测脚本都吃第二个参数当 baseUrl，所以同一套断言可以直接打生产：
