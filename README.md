@@ -550,4 +550,5 @@ npm run deploy                            # 本地手动发版（等同，但会
 
 ### 网络备注（本机）
 
-需走代理才能访问 github/npm：`http_proxy=http://127.0.0.1:7897`；`~/.ssh` 无密钥，clone 一律 HTTPS。
+需走代理才能访问 github/npm：`http_proxy=http://127.0.0.1:7897`；`~/.ssh` 无密钥，clone 一律 HTTPS
+
