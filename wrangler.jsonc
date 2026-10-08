@@ -1,3 +1,8 @@
+// 部署：仓库已接入 Cloudflare Workers Builds（Worker → 设置 → 构建），生产分支 main。
+// 推 commit 即自动跑「构建命令 = npm run typecheck」→「部署命令 = npx wrangler deploy」，
+// 类型检查不过就不会上线，相当于 CI 的 verify 门。
+// 本地手动发版：npm run deploy（效果等同，但会绕过 typecheck 门）。
+// 6 个运行时 secret 存在 Cloudflare 侧，wrangler deploy 不会覆盖或删除它们。
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "remotedesktopcloud",
