@@ -18,9 +18,24 @@
  *   8  全程耗时          → ping 不该等到超时
  */
 import { createHash, randomBytes } from "node:crypto";
+import { readFileSync } from "node:fs";
 
 const BASE = (process.argv[2] ?? "http://localhost:8787").replace(/\/$/, "");
-const PASSWORD = process.env.AUTH_PASSWORD ?? "Relay-DCM-2026";
+/**
+ * 控制台 / GoTrue 登录密码。
+ * 禁止硬编码默认值 —— 本仓库是 public，任何写进来的字面量都会被全世界读到。
+ * 只从环境变量，或 .dev.vars / .env（这俩不入库）里取；取不到就直接失败。
+ */
+const PASSWORD = (() => {
+  if (process.env.AUTH_PASSWORD) return process.env.AUTH_PASSWORD;
+  for (const p of ["../.dev.vars", "../.env"]) {
+    try {
+      const m = readFileSync(new URL(p, import.meta.url), "utf8").match(/^AUTH_PASSWORD=(.*)$/m);
+      if (m?.[1].trim()) return m[1].trim();
+    } catch { /* 文件不存在，试下一个 */ }
+  }
+  throw new Error("AUTH_PASSWORD 未设置：写入 .dev.vars / .env（不入库），或用环境变量传入");
+})();
 const REDIRECT_URI = "https://chatgpt.com/connector_platform_oauth_redirect";
 
 let pass = 0;
